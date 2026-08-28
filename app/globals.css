@@ -1112,10 +1112,15 @@ h2 { margin: 0; font-size: 18px; letter-spacing: -.02em; }
 .app-loading-overlay {
   position: fixed;
   inset: 0;
+  width: 100vw;
+  height: 100dvh;
   z-index: 4000;
-  display: grid;
-  place-items: center;
-  padding: env(safe-area-inset-top) 18px env(safe-area-inset-bottom);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  margin: 0;
+  text-align: center;
   background: color-mix(in srgb, var(--bg) 94%, transparent);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
@@ -1127,10 +1132,14 @@ h2 { margin: 0; font-size: 18px; letter-spacing: -.02em; }
   -webkit-backdrop-filter: blur(8px);
 }
 .brand-loader {
+  width: min(220px, 80vw);
   display: grid;
-  justify-items: center;
+  place-items: center;
+  justify-content: center;
   gap: 12px;
+  margin: 0 auto;
   color: var(--muted);
+  text-align: center;
   font-size: 12px;
   font-weight: 800;
   letter-spacing: .01em;

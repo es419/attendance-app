@@ -236,7 +236,7 @@ async function api<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> 
   const request = (async () => {
     let response: Response;
     try {
-      response = await fetch(input, { ...init, cache: "no-store" });
+      response = await fetch(input, { ...init, cache: "no-store", credentials: "include" });
     } catch {
       throw new ApiRequestError("אין כרגע חיבור לרשת", true);
     }

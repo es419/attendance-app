@@ -73,6 +73,8 @@ export async function GET(request: Request) {
       secure: process.env.NODE_ENV === "production",
       path: "/",
       maxAge: 60 * 60 * 24 * 365,
+      expires: new Date(Date.now() + 1000 * 60 * 60 * 24 * 365),
+      priority: "high",
     }
   );
   return response;

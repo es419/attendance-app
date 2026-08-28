@@ -37,6 +37,7 @@ export async function GET(request: Request) {
     secure: process.env.NODE_ENV === "production",
     path: "/",
     maxAge: 10 * 60,
+    priority: "high",
   });
   return response;
 }

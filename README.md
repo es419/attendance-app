@@ -176,3 +176,7 @@ The Google refresh token is kept only inside an encrypted HttpOnly cookie and is
 - Background Drive reconciliation runs every 3 minutes; foreground refreshes are debounced and cache-aware.
 - The UI clock refresh interval is reduced to avoid rerendering the whole app every second.
 - Initial boot and tab changes use the app icon as a branded loading transition.
+
+## Auth persistence / canonical Vercel host
+
+The app now redirects Vercel deployment-specific hostnames to the canonical origin derived from `GOOGLE_REDIRECT_URI`. This matters because OAuth cookies are host-bound: authenticating on the stable production alias and later opening a deployment URL would otherwise appear as a disconnected session. Keep `GOOGLE_REDIRECT_URI` set to the stable production URL, e.g. `https://attendance-app-blush-two.vercel.app/api/auth/google/callback`.
