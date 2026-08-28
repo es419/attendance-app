@@ -245,3 +245,8 @@ Example:
 ## Missing Drive workspace recovery
 
 When a previously cached attendance workspace is deleted or moved to Trash directly in Google Drive, the app now treats the cached card as a local tombstone instead of leaving it selected and broken. The current selection is cleared and the Home screen returns to the no-workspace/create flow. In the Files screen the stale card is marked as missing and can be removed locally without issuing another Drive delete request. Restoring the original Drive workspace before local removal allows normal reconciliation to revive it on the next sync.
+
+
+## My Drive root creation rule
+
+When using **Create first file**, the first user-defined folder is created directly in **My Drive**. The app does not auto-create an extra `נוכחות בעבודה` wrapper folder. Example: `My Drive / רשות נוכחות עבודה / רשות המיסים / נוכחות 2026` (Google Sheet). Legacy wrapper folders from older versions are still recognised but are not recreated.

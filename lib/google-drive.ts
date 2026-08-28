@@ -141,6 +141,9 @@ export async function ensureRootFolder() {
   const configuredId = process.env.GOOGLE_DRIVE_ROOT_FOLDER_ID?.trim();
   if (configuredId) return configuredId;
 
+  // Legacy compatibility only: if an older version already created a managed
+  // root folder we can still recognise it, but we NEVER create one implicitly.
+  // New workspaces created from "צור קובץ ראשון" must sit directly in My Drive.
   const marked = await driveList(`mimeType='${FOLDER_MIME}' and trashed=false and appProperties has { key='attendanceApp' and value='root' }`, "createdTime");
   if (marked.files[0]?.id) {
     const root = marked.files[0];
@@ -156,13 +159,9 @@ export async function ensureRootFolder() {
     return named.files[0].id;
   }
 
-  const created = await createDriveFile({
-    name: ROOT_FOLDER_NAME,
-    mimeType: FOLDER_MIME,
-    parents: ["root"],
-    appProperties: managedProps("root"),
-  });
-  return created.id;
+  // "root" is Google's My Drive root id. Returning it avoids creating the
+  // unwanted extra "נוכחות בעבודה" wrapper folder on fresh installs.
+  return "root";
 }
 
 async function resolveParentPath(parentId: string | undefined, appRootId: string) {
@@ -423,8 +422,8 @@ function normalizePathParts(parts: string[]) {
   return parts.map((part) => part.trim()).filter(Boolean).slice(0, 10);
 }
 
-async function ensureFolderPath(parts: string[]) {
-  const rootId = await ensureRootFolder();
+async function ensureFolderPath(parts: string[], baseParentId?: string) {
+  const rootId = baseParentId || await ensureRootFolder();
   let parentId = rootId;
   const clean = normalizePathParts(parts);
   for (const part of clean) {
@@ -443,7 +442,9 @@ export async function createAttendanceFile(input: CreateAttendanceFileInput): Pr
 
   // The final folder in the requested path IS the attendance workspace.
   // We no longer create an extra visible wrapper folder such as “נוכחות 2026”.
-  const target = await ensureFolderPath(path);
+  // First-file creation is always rooted directly in My Drive. Do not put the
+  // user's folder inside an app-generated wrapper folder.
+  const target = await ensureFolderPath(path, "root");
   const container = await getDriveFile(target.parentId);
   if (container.appProperties?.workspaceKey && container.appProperties?.workspaceDisabled !== "true") {
     throw new Error("כבר קיים קובץ נוכחות פעיל בתיקייה שנבחרה");
