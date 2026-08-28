@@ -210,3 +210,6 @@ The net figure is intentionally an estimate: it subtracts the configured percent
 
 ### iPhone manual shift form containment
 Native date/time/number fields are constrained to the modal's available width on small iPhone viewports. The fix preserves the native iOS pickers while preventing horizontal overflow.
+
+## Daily pay on attendance records
+Each attendance record now shows the estimated total base pay for that calendar day, calculated from all credited work minutes on the same date multiplied by the workspace hourly rate. Monthly additions are intentionally not allocated to individual days.

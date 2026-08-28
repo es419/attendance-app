@@ -1644,3 +1644,35 @@ h2 { margin: 0; font-size: 18px; letter-spacing: -.02em; }
     min-width: 0;
   }
 }
+
+/* Daily estimated pay shown beside each attendance record */
+.record-daily-pay {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 24px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--accent-surface);
+  border: 1px solid var(--accent-line);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 850;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  direction: ltr;
+}
+
+@media (max-width: 520px) {
+  .record-card .record-date {
+    column-gap: 5px;
+    row-gap: 4px;
+  }
+  .record-daily-pay {
+    min-height: 20px;
+    padding: 2px 6px;
+    font-size: 9px;
+    margin-inline-start: auto;
+  }
+}

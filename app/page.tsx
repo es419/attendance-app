@@ -800,6 +800,18 @@ export default function Page() {
     () => entries.reduce((sum, entry) => sum + (entry.clockOut ? entry.durationMinutes : entry.id === activeEntry?.id ? liveCredited : 0), 0),
     [activeEntry?.id, entries, liveCredited],
   );
+  const dailyMinutesByDate = useMemo(() => {
+    const totals = new Map<string, number>();
+    for (const entry of entries) {
+      const minutes = entry.clockOut
+        ? entry.durationMinutes
+        : entry.id === activeEntry?.id
+          ? liveCredited
+          : 0;
+      totals.set(entry.date, (totals.get(entry.date) || 0) + Math.max(0, minutes));
+    }
+    return totals;
+  }, [activeEntry?.id, entries, liveCredited]);
   const targetMinutes = Math.max(60, Math.round((payrollSettings.targetHours || DEFAULT_TARGET_HOURS) * 60));
   const remaining = Math.max(0, targetMinutes - monthMinutes);
   const progress = Math.min(100, (monthMinutes / targetMinutes) * 100);
@@ -1449,7 +1461,12 @@ export default function Page() {
                   : entry.durationMinutes;
                 return (
                   <article className="record-card record-card-actions" key={entry.id}>
-                    <div className="record-date"><strong>{entry.date}</strong><span>{entry.weekday}</span></div>
+                    <div className="record-date">
+                      <strong>{entry.date}</strong><span>{entry.weekday}</span>
+                      <b className="record-daily-pay" title="שכר יומי משוער לפי השכר השעתי, ללא תוספות חודשיות">
+                        {formatMoney(((dailyMinutesByDate.get(entry.date) || 0) / 60) * Math.max(0, payrollSettings.hourlyRate || 0))}
+                      </b>
+                    </div>
                     <div className="record-summary" aria-label="פרטי המשמרת">
                       <div><span>כניסה</span><strong>{entry.clockIn}</strong></div>
                       <div><span>יציאה</span><strong>{entry.clockOut || "פעיל"}</strong></div>
