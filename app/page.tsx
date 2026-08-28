@@ -266,6 +266,10 @@ async function api<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> 
   return request;
 }
 
+function isWorkspaceMissingError(error: unknown) {
+  return error instanceof Error && error.message.includes("תיק הנוכחות לא נמצא או אינו פעיל ב-Google Drive");
+}
+
 function eventEndpoint(event: OfflineAttendanceEvent) {
   if (event.type === "manual") return "/api/attendance/manual";
   return `/api/attendance/${event.type}`;
@@ -507,6 +511,30 @@ export default function Page() {
     }
   }, []);
 
+  const markWorkspaceMissing = useCallback((workspaceId: string, showMessage = true) => {
+    const missingSince = new Date().toISOString();
+    setFiles((current) => {
+      const next = current.map((file) => file.id === workspaceId
+        ? { ...file, missingFromDrive: true, missingSince, webViewLink: undefined }
+        : file);
+      window.localStorage.setItem(FILES_CACHE_KEY, JSON.stringify(next));
+      return next;
+    });
+    window.localStorage.removeItem(`${ACTIVE_CACHE_PREFIX}${workspaceId}`);
+    const saved = window.localStorage.getItem("attendance:selectedWorkspace");
+    if (saved === workspaceId) window.localStorage.removeItem("attendance:selectedWorkspace");
+    setSelectedFileId((current) => current === workspaceId ? null : current);
+    setEntries([]);
+    setActiveShift(null);
+    setEditingEntry(null);
+    setManualOpen(false);
+    setTab("home");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    if (showMessage) {
+      setMessage("תיק הנוכחות לא נמצא ב-Google Drive. חזרת למסך הראשי; אפשר ליצור תיק חדש או להסיר את הרשומה המקומית ממסך הקבצים.");
+    }
+  }, []);
+
   const loadFiles = useCallback(async (force = false) => {
     if (!navigator.onLine) return;
     const nowMs = Date.now();
@@ -515,14 +543,38 @@ export default function Page() {
     try {
       const data = await api<{ files: AttendanceFile[] }>("/api/drive/files");
       filesFetchedAtRef.current = Date.now();
-      setFiles(data.files);
-      window.localStorage.setItem(FILES_CACHE_KEY, JSON.stringify(data.files));
-      setSelectedFileId((current) => {
-        const saved = window.localStorage.getItem("attendance:selectedWorkspace");
-        const candidate = current || saved;
-        if (candidate && data.files.some((file) => file.id === candidate)) return candidate;
-        return data.files[0]?.id || null;
-      });
+
+      // Keep a local tombstone for files that disappeared from Drive. This lets the
+      // user explicitly remove the stale app card instead of leaving a broken selection.
+      const freshFiles = data.files.map((file) => ({ ...file, missingFromDrive: false, missingSince: undefined }));
+      const freshIds = new Set(freshFiles.map((file) => file.id));
+      const cached = readJson<AttendanceFile[]>(FILES_CACHE_KEY, []);
+      const missing = cached
+        .filter((file) => !freshIds.has(file.id))
+        .map((file) => ({
+          ...file,
+          missingFromDrive: true,
+          missingSince: file.missingSince || new Date().toISOString(),
+          webViewLink: undefined,
+        }));
+      const merged = [...freshFiles, ...missing];
+      setFiles(merged);
+      window.localStorage.setItem(FILES_CACHE_KEY, JSON.stringify(merged));
+
+      const saved = window.localStorage.getItem("attendance:selectedWorkspace");
+      if (saved && !freshIds.has(saved)) {
+        window.localStorage.removeItem("attendance:selectedWorkspace");
+        window.localStorage.removeItem(`${ACTIVE_CACHE_PREFIX}${saved}`);
+        setSelectedFileId(null);
+        setEntries([]);
+        setActiveShift(null);
+        setTab("home");
+        setMessage("תיק הנוכחות שנבחר כבר לא נמצא ב-Google Drive. אפשר ליצור תיק חדש או להסיר את הרשומה הישנה ממסך הקבצים.");
+      } else if (saved && freshIds.has(saved)) {
+        setSelectedFileId(saved);
+      } else {
+        setSelectedFileId((current) => current && freshIds.has(current) ? current : freshFiles[0]?.id || null);
+      }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "לא ניתן לסנכרן את Drive");
     } finally {
@@ -546,12 +598,16 @@ export default function Page() {
       setEntries(data.entries);
       window.localStorage.setItem(key, JSON.stringify(data.entries));
     } catch (error) {
+      if (isWorkspaceMissingError(error)) {
+        markWorkspaceMissing(workspaceId);
+        return;
+      }
       if (cached.length) setEntries(cached);
       setMessage(error instanceof Error ? error.message : "לא ניתן לקרוא רשומות");
     } finally {
       setLoadingEntries(false);
     }
-  }, [status?.connected]);
+  }, [markWorkspaceMissing, status?.connected]);
 
   const activeCacheKey = useCallback((workspaceId: string) => `${ACTIVE_CACHE_PREFIX}${workspaceId}`, []);
 
@@ -572,11 +628,15 @@ export default function Page() {
       else window.localStorage.removeItem(key);
       return data.entry;
     } catch (error) {
+      if (isWorkspaceMissingError(error)) {
+        markWorkspaceMissing(workspaceId);
+        return null;
+      }
       setActiveShift(cached);
       if (error instanceof Error) setMessage(error.message);
       return cached;
     }
-  }, [activeCacheKey, status?.connected]);
+  }, [activeCacheKey, markWorkspaceMissing, status?.connected]);
 
   const saveQueue = useCallback((events: OfflineAttendanceEvent[]) => {
     setQueue(events);
@@ -758,7 +818,7 @@ export default function Page() {
       const now = Date.now();
       if (now - lastForegroundSync < 10000) return;
       lastForegroundSync = now;
-      void loadFiles();
+      void loadFiles(true);
       if (selectedFileId) {
         void loadEntries(selectedFileId, viewYear, viewMonth);
         void loadActiveShift(selectedFileId);
@@ -1078,7 +1138,40 @@ export default function Page() {
     finally { setPendingAction(null); }
   }
 
+  function removeFileFromApp(file: AttendanceFile) {
+    const pendingForFile = readJson<OfflineAttendanceEvent[]>(QUEUE_KEY, []).filter((event) => event.workspaceId === file.id).length;
+    const extra = pendingForFile ? `\nיש ${pendingForFile} פעולות מקומיות שטרם סונכרנו וגם הן יימחקו.` : "";
+    if (!window.confirm(`להסיר את “${file.name}” מהאפליקציה בלבד?\nהקובץ כבר לא נמצא ב-Google Drive.${extra}`)) return;
+
+    const nextFiles = readJson<AttendanceFile[]>(FILES_CACHE_KEY, []).filter((item) => item.id !== file.id);
+    window.localStorage.setItem(FILES_CACHE_KEY, JSON.stringify(nextFiles));
+    window.localStorage.removeItem(`${ACTIVE_CACHE_PREFIX}${file.id}`);
+    for (let index = window.localStorage.length - 1; index >= 0; index--) {
+      const key = window.localStorage.key(index);
+      if (key?.startsWith(`${ENTRY_CACHE_PREFIX}${file.id}:`)) window.localStorage.removeItem(key);
+    }
+
+    const nextQueue = readJson<OfflineAttendanceEvent[]>(QUEUE_KEY, []).filter((event) => event.workspaceId !== file.id);
+    saveQueue(nextQueue);
+    const failed = readJson<Array<{ event: OfflineAttendanceEvent; reason: string; failedAt: string }>>(FAILED_QUEUE_KEY, []);
+    window.localStorage.setItem(FAILED_QUEUE_KEY, JSON.stringify(failed.filter((item) => item.event.workspaceId !== file.id)));
+
+    if (window.localStorage.getItem("attendance:selectedWorkspace") === file.id) {
+      window.localStorage.removeItem("attendance:selectedWorkspace");
+    }
+    setFiles((current) => current.filter((item) => item.id !== file.id));
+    setMenuFile(null);
+    if (selectedFileId === file.id) {
+      setSelectedFileId(null);
+      setEntries([]);
+      setActiveShift(null);
+      setTab("home");
+    }
+    setMessage("הרשומה המקומית הוסרה מהאפליקציה. לא בוצעה שום פעולה ב-Google Drive.");
+  }
+
   async function deleteFile(file: AttendanceFile) {
+    if (file.missingFromDrive) return removeFileFromApp(file);
     if (!status?.connected || !online) return setMessage("מחיקה דורשת חיבור ל-Drive");
     if (!window.confirm(`להעביר את “${file.name}” וכל התוכן שלו לאשפה ב-Google Drive?`)) return;
     setPendingAction("delete");
@@ -1086,8 +1179,14 @@ export default function Page() {
       await api(`/api/drive/files/${encodeURIComponent(file.id)}`, { method: "DELETE" });
       setMenuFile(null); window.localStorage.removeItem(activeCacheKey(file.id)); if (selectedFileId === file.id) setSelectedFileId(null); await loadFiles(true);
       setMessage("קובץ הנוכחות הועבר לאשפה ב-Google Drive");
-    } catch (error) { setMessage(error instanceof Error ? error.message : "לא ניתן למחוק"); }
-    finally { setPendingAction(null); }
+    } catch (error) {
+      if (isWorkspaceMissingError(error)) {
+        setMenuFile(null);
+        markWorkspaceMissing(file.id);
+      } else {
+        setMessage(error instanceof Error ? error.message : "לא ניתן למחוק");
+      }
+    } finally { setPendingAction(null); }
   }
 
   function openEditEntry(entry: AttendanceEntry) {
@@ -1523,10 +1622,27 @@ export default function Page() {
             <div className="section-heading"><div><p className="eyebrow">Drive-first</p><h2>קבצי נוכחות</h2></div><div className="heading-actions"><button className="small-button" disabled={!connected || !online} onClick={() => void openExistingDriveFiles()}><Icon name="drive"/>קובץ קיים</button><button className="small-button" disabled={!connected || !online} onClick={() => setFolderManagerOpen(true)}><Icon name="folder"/>תיקיות</button><button className="small-button" disabled={!connected || !online} onClick={() => setCreateOpen(true)}><Icon name="plus"/>חדש</button></div></div>
             {files.length === 0 && !loadingFiles && <div className="empty-state">אין קבצי נוכחות במטמון/Drive.</div>}
             {files.map((file) => (
-              <article className={`file-card ${selectedFileId === file.id ? "selected-file" : ""}`} key={file.id} onClick={() => { setSelectedFileId(file.id); setTab("home"); }}>
+              <article
+                className={`file-card ${selectedFileId === file.id ? "selected-file" : ""} ${file.missingFromDrive ? "missing-file" : ""}`}
+                key={file.id}
+                onClick={() => {
+                  if (file.missingFromDrive) { setMenuFile(file); return; }
+                  setSelectedFileId(file.id);
+                  setTab("home");
+                }}
+              >
                 <div className="file-icon"><Icon name="files"/></div>
-                <div className="file-info"><strong>{file.name}</strong><span className="file-path">{file.insideRoot === false ? "מחוץ לתיקיית האפליקציה · " : ""}{(file.folderPath || []).join(" / ") || "שורש האפליקציה"}</span></div>
-                <span className="sync-dot"/>
+                <div className="file-info">
+                  <strong>{file.name}</strong>
+                  <span className={`file-path ${file.missingFromDrive ? "missing-file-path" : ""}`}>
+                    {file.missingFromDrive
+                      ? "לא נמצא ב-Google Drive · נשמר רק במטמון המקומי"
+                      : `${file.insideRoot === false ? "מחוץ לתיקיית האפליקציה · " : ""}${(file.folderPath || []).join(" / ") || "שורש האפליקציה"}`}
+                  </span>
+                </div>
+                {file.missingFromDrive
+                  ? <button className="stale-remove-button" onClick={(event) => { event.stopPropagation(); removeFileFromApp(file); }}>הסר</button>
+                  : <span className="sync-dot"/>}
                 <button className="icon-button compact" aria-label="אפשרויות" onClick={(event) => { event.stopPropagation(); setMenuFile(file); }}><Icon name="more"/></button>
               </article>
             ))}
@@ -1554,7 +1670,7 @@ export default function Page() {
 
       {folderManagerOpen && <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setFolderManagerOpen(false)}><div className="modal-card folder-manager"><div className="modal-title"><div><p className="eyebrow">Google Drive</p><h2>ניהול תיקיות</h2></div><button className="icon-button compact" onClick={() => setFolderManagerOpen(false)}><Icon name="close"/></button></div><label className="field-label">צור נתיב חדש</label><div className="inline-create"><input className="text-input" value={newFolderPath} onChange={(e) => setNewFolderPath(e.target.value)} placeholder="עבודה / 2026 / פרויקט"/><button className="small-button" disabled={!newFolderPath.trim() || Boolean(pendingAction)} onClick={() => void createFolderPath()}><Icon name="plus"/>צור</button></div><div className="folder-list">{folders.length === 0 && <div className="empty-state">אין תיקיות משנה.</div>}{folders.map((folder) => <div className="folder-row" key={folder.id}><div><strong>{folder.name}</strong><span>{folder.path.join(" / ")}{folder.containsWorkspaces ? ` · ${folder.containsWorkspaces} קבצי נוכחות` : ""}</span></div><div className="folder-actions"><button className="icon-button compact" aria-label="שנה שם תיקייה" onClick={() => void renameFolder(folder)}><Icon name="edit"/></button><button className="icon-button compact danger-icon" aria-label="מחק תיקייה" onClick={() => void deleteFolder(folder)}><Icon name="trash"/></button></div></div>)}</div><p className="modal-note">מחיקת תיקייה מעבירה אותה לאשפה ב-Drive יחד עם התוכן שבתוכה. אפשר לשחזר מהאשפה של Google Drive.</p></div></div>}
 
-      {menuFile && <div className="modal-backdrop bottom-sheet-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setMenuFile(null)}><div className="bottom-sheet"><div className="sheet-grabber"/><div className="sheet-file-title"><strong>{menuFile.name}</strong><span>{(menuFile.folderPath || []).join(" / ") || "שורש האפליקציה"}</span></div>{menuFile.webViewLink && <a className="sheet-action" href={menuFile.webViewLink} target="_blank" rel="noreferrer"><Icon name="external"/>פתח ב-Google Drive</a>}<button className="sheet-action" onClick={() => { setSelectedFileId(menuFile.id); setMenuFile(null); setCurrentFolderSubfolderOpen(true); }}><Icon name="folder"/>צור תיקייה במיקום הזה</button><button className="sheet-action" onClick={() => void renameFile(menuFile)}><Icon name="edit"/>שנה שם</button><button className="sheet-action" onClick={() => openMove(menuFile)}><Icon name="move"/>שנה נתיב / העבר</button><button className="sheet-action danger" onClick={() => void deleteFile(menuFile)}><Icon name="trash"/>העבר לאשפה</button><button className="sheet-cancel" onClick={() => setMenuFile(null)}>ביטול</button></div></div>}
+      {menuFile && <div className="modal-backdrop bottom-sheet-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setMenuFile(null)}><div className="bottom-sheet"><div className="sheet-grabber"/><div className="sheet-file-title"><strong>{menuFile.name}</strong><span>{menuFile.missingFromDrive ? "לא נמצא ב-Google Drive" : ((menuFile.folderPath || []).join(" / ") || "שורש האפליקציה")}</span></div>{menuFile.missingFromDrive ? <><div className="missing-file-sheet-note">הקובץ נמחק או הועבר לאשפה ב-Drive. הרשומה הזאת נשארה רק במטמון המקומי של האפליקציה.</div><button className="sheet-action danger" onClick={() => removeFileFromApp(menuFile)}><Icon name="trash"/>הסר מהאפליקציה בלבד</button></> : <>{menuFile.webViewLink && <a className="sheet-action" href={menuFile.webViewLink} target="_blank" rel="noreferrer"><Icon name="external"/>פתח ב-Google Drive</a>}<button className="sheet-action" onClick={() => { setSelectedFileId(menuFile.id); setMenuFile(null); setCurrentFolderSubfolderOpen(true); }}><Icon name="folder"/>צור תיקייה במיקום הזה</button><button className="sheet-action" onClick={() => void renameFile(menuFile)}><Icon name="edit"/>שנה שם</button><button className="sheet-action" onClick={() => openMove(menuFile)}><Icon name="move"/>שנה נתיב / העבר</button><button className="sheet-action danger" onClick={() => void deleteFile(menuFile)}><Icon name="trash"/>העבר לאשפה</button></>}<button className="sheet-cancel" onClick={() => setMenuFile(null)}>ביטול</button></div></div>}
 
       {currentFolderSubfolderOpen && selectedFile && <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setCurrentFolderSubfolderOpen(false)}><div className="modal-card"><div className="modal-title"><div><p className="eyebrow">ליד התיק הנוכחי</p><h2>צור תיקייה חדשה</h2></div><button className="icon-button compact" onClick={() => setCurrentFolderSubfolderOpen(false)}><Icon name="close"/></button></div><p className="modal-note">התיקייה החדשה תיווצר ליד “{selectedFile.folderPath?.at(-1) || selectedFile.name}”, לא בתוכה. בתוך התיקייה החדשה ייווצר ישירות קובץ Google Sheets בשם “נוכחות {new Date().getFullYear()}”.</p><div className="drive-preview"><span>התיקייה שבה שתיהן יהיו</span><strong>{(selectedFile.folderPath || []).slice(0, -1).join(" / ") || "נוכחות בעבודה"}</strong><small>{(selectedFile.folderPath || []).slice(0, -1).join(" / ") || "נוכחות בעבודה"} / {currentFolderSubfolderName.trim() || "התיקייה החדשה"} / נוכחות {new Date().getFullYear()}</small></div><label className="field-label">שם התיקייה החדשה</label><input className="text-input" value={currentFolderSubfolderName} onChange={(e) => setCurrentFolderSubfolderName(e.target.value)} placeholder="לדוגמה: מס הכנסה חיפה" autoFocus/><button className="primary-action modal-action" disabled={!currentFolderSubfolderName.trim() || Boolean(pendingAction)} onClick={() => void createSubfolderAtCurrentLocation()}>{pendingAction === "folder" ? "יוצר ב-Drive…" : `צור תיקייה + נוכחות ${new Date().getFullYear()}`}</button></div></div>}
 

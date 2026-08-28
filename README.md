@@ -241,3 +241,7 @@ Example:
 └── מס הכנסה חיפה/
     └── נוכחות 2026
 ```
+
+## Missing Drive workspace recovery
+
+When a previously cached attendance workspace is deleted or moved to Trash directly in Google Drive, the app now treats the cached card as a local tombstone instead of leaving it selected and broken. The current selection is cleared and the Home screen returns to the no-workspace/create flow. In the Files screen the stale card is marked as missing and can be removed locally without issuing another Drive delete request. Restoring the original Drive workspace before local removal allows normal reconciliation to revive it on the next sync.

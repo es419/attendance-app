@@ -52,6 +52,9 @@ export type AttendanceFile = {
   webViewLink?: string;
   breakAllowanceMinutes?: number;
   payrollSettings?: PayrollSettings;
+  /** Cached workspace that no longer exists in Google Drive. */
+  missingFromDrive?: boolean;
+  missingSince?: string;
 };
 
 

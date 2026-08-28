@@ -1829,3 +1829,36 @@ h2 { margin: 0; font-size: 18px; letter-spacing: -.02em; }
     font-size: 15px;
   }
 }
+
+/* Missing Drive workspace recovery */
+.file-card.missing-file {
+  border-color: color-mix(in srgb, var(--danger) 28%, var(--line));
+  background: color-mix(in srgb, var(--danger-surface) 42%, var(--surface-solid));
+}
+.file-card.missing-file .file-icon {
+  color: var(--danger);
+  background: var(--danger-surface);
+}
+.missing-file-path {
+  color: var(--danger) !important;
+  font-weight: 700;
+}
+.stale-remove-button {
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in srgb, var(--danger) 24%, var(--line));
+  border-radius: 10px;
+  background: var(--danger-surface);
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 800;
+}
+.missing-file-sheet-note {
+  margin: 4px 6px 6px;
+  padding: 11px 12px;
+  border-radius: 13px;
+  background: var(--danger-surface);
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.55;
+}

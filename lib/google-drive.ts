@@ -358,7 +358,16 @@ export async function listAttendanceFiles(): Promise<AttendanceFile[]> {
 }
 
 export async function assertAttendanceWorkspace(workspaceId: string) {
-  const file = await getDriveFile(workspaceId);
+  let file: DriveFile;
+  try {
+    file = await getDriveFile(workspaceId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (/file not found|not found|404/i.test(message)) {
+      throw new Error("תיק הנוכחות לא נמצא או אינו פעיל ב-Google Drive");
+    }
+    throw error;
+  }
   if (
     file.trashed ||
     file.mimeType !== FOLDER_MIME ||
