@@ -495,7 +495,22 @@ export default function Page() {
 
   useEffect(() => {
     if (!status?.connected || !online) return;
-    const sync = () => {
+
+    // Background reconciliation is intentionally Drive-only. Reading the active
+    // Google Sheet every few seconds can exhaust the Sheets per-user read quota,
+    // especially while schema migrations or multiple tabs are active.
+    const backgroundSync = () => {
+      void loadFiles();
+      void flushQueue();
+    };
+
+    // When the user actually returns to the app, refresh the visible attendance
+    // data as well. focus + visibilitychange often fire together, so debounce them.
+    let lastForegroundSync = 0;
+    const foregroundSync = () => {
+      const now = Date.now();
+      if (now - lastForegroundSync < 10000) return;
+      lastForegroundSync = now;
       void loadFiles();
       if (selectedFileId) {
         void loadEntries(selectedFileId);
@@ -503,13 +518,14 @@ export default function Page() {
       }
       void flushQueue();
     };
-    const interval = window.setInterval(sync, 15000);
-    const onVisible = () => document.visibilityState === "visible" && sync();
-    window.addEventListener("focus", sync);
+
+    const interval = window.setInterval(backgroundSync, 60000);
+    const onVisible = () => document.visibilityState === "visible" && foregroundSync();
+    window.addEventListener("focus", foregroundSync);
     document.addEventListener("visibilitychange", onVisible);
     return () => {
       window.clearInterval(interval);
-      window.removeEventListener("focus", sync);
+      window.removeEventListener("focus", foregroundSync);
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [status?.connected, online, selectedFileId, loadActiveShift, loadEntries, loadFiles, flushQueue]);
@@ -555,6 +571,13 @@ export default function Page() {
     if (!selectedFileId) return;
     await Promise.all([loadEntries(selectedFileId), loadActiveShift(selectedFileId)]);
   }, [loadActiveShift, loadEntries, selectedFileId]);
+
+  const syncNow = useCallback(async () => {
+    if (!status?.connected || !navigator.onLine) return;
+    await loadFiles();
+    if (selectedFileId) await Promise.all([loadEntries(selectedFileId), loadActiveShift(selectedFileId)]);
+    await flushQueue();
+  }, [flushQueue, loadActiveShift, loadEntries, loadFiles, selectedFileId, status?.connected]);
 
   function enqueueAndApply(event: OfflineAttendanceEvent) {
     const current = readJson<OfflineAttendanceEvent[]>(QUEUE_KEY, []);
@@ -949,7 +972,7 @@ export default function Page() {
 
         {tab === "files" && (
           <div className="screen-content">
-            {connected && <div className="drive-account"><div className="drive-badge"><Icon name="drive"/></div><div><strong>{status?.name || "Google Drive"}</strong><span>{status?.email || "מחובר"}</span></div><button className="text-button" onClick={() => void loadFiles()}>{loadingFiles ? "מסנכרן…" : "סנכרן"}</button></div>}
+            {connected && <div className="drive-account"><div className="drive-badge"><Icon name="drive"/></div><div><strong>{status?.name || "Google Drive"}</strong><span>{status?.email || "מחובר"}</span></div><button className="text-button" onClick={() => void syncNow()}>{loadingFiles ? "מסנכרן…" : "סנכרן"}</button></div>}
             {!connected && <section className="panel compact-connect"><div><strong>{online ? "Google Drive מנותק" : "מצב Offline"}</strong><span>הקבצים האחרונים נשארים זמינים מהמטמון. בהתחברות הבאה תתבצע התאמה מלאה מול Drive.</span></div>{online && configured && <a className="small-button connect-small" href="/api/auth/google">התחבר</a>}</section>}
             <div className="section-heading"><div><p className="eyebrow">Drive-first</p><h2>קבצי נוכחות</h2></div><div className="heading-actions"><button className="small-button" disabled={!connected || !online} onClick={() => setFolderManagerOpen(true)}><Icon name="folder"/>תיקיות</button><button className="small-button" disabled={!connected || !online} onClick={() => setCreateOpen(true)}><Icon name="plus"/>חדש</button></div></div>
             {files.length === 0 && !loadingFiles && <div className="empty-state">אין קבצי נוכחות במטמון/Drive.</div>}
