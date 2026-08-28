@@ -1001,14 +1001,14 @@ export default function Page() {
                       <div className={Math.max(0, breaks - breakAllowanceMinutes) > 0 ? "metric-warning" : ""}><span>חריגה</span><strong>{formatDuration(Math.max(0, breaks - breakAllowanceMinutes))}</strong></div>
                       <div className="metric-primary"><span>לחיוב</span><strong>{formatDuration(total)}</strong></div>
                     </div>
-                    <div className="record-break-details">
+                    {(breaks > 0 || Boolean(entry.breaks?.length)) && <div className="record-break-details">
                       <Icon name="coffee" />
-                      <div><span>פירוט הפסקות · כלל {breakAllowanceMinutes} דק׳</span><strong>{entry.breaks?.length ? entry.breaks.map((item) => `${item.start}–${item.end || "פעילה"}`).join(" · ") : breaks ? `${formatDuration(breaks)} (ידני)` : "ללא הפסקה"}</strong></div>
-                    </div>
+                      <div><span>פירוט הפסקות · כלל {breakAllowanceMinutes} דק׳</span><strong>{entry.breaks?.length ? entry.breaks.map((item) => `${item.start}–${item.end || "פעילה"}`).join(" · ") : `${formatDuration(breaks)} (ידני)`}</strong></div>
+                    </div>}
                     {entry.note && <div className="record-note"><span>הערה</span><strong>{entry.note}</strong></div>}
                     <div className="record-tools">
-                      <button aria-label="ערוך רשומה" title="ערוך רשומה" onClick={() => openEditEntry(entry)}><Icon name="edit"/></button>
-                      <button aria-label="מחק רשומה" title="מחק רשומה" className="danger-icon" onClick={() => void deleteEntry(entry)}><Icon name="trash"/></button>
+                      <button aria-label="ערוך רשומה" title="ערוך רשומה" onClick={() => openEditEntry(entry)}><Icon name="edit"/><span>ערוך</span></button>
+                      <button aria-label="מחק רשומה" title="מחק רשומה" className="danger-icon" onClick={() => void deleteEntry(entry)}><Icon name="trash"/><span>מחק</span></button>
                     </div>
                   </article>
                 );

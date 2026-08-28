@@ -450,3 +450,202 @@ h2 { margin: 0; font-size: 18px; letter-spacing: -.02em; }
   .disconnected-connect-card { min-height: calc(100dvh - 138px); margin-top: 8px; border-radius: 24px; }
   .disconnected-connect-card .app-logo { width: 92px; height: 92px; border-radius: 25px; }
 }
+
+/* Compact record rows + navigation visually attached to the app surface */
+.record-list {
+  gap: 8px !important;
+}
+.record-card.record-card-actions {
+  grid-template-columns: minmax(165px, .95fr) minmax(410px, 2.2fr) auto;
+  grid-template-areas:
+    "main metrics tools"
+    "breaks breaks breaks"
+    "note note note";
+  gap: 7px 14px;
+  padding: 11px 14px;
+  border-radius: 15px;
+  box-shadow: none;
+}
+.record-main {
+  gap: 5px;
+}
+.record-date {
+  gap: 6px;
+}
+.record-date strong {
+  font-size: 15px;
+}
+.record-date span,
+.record-date em {
+  font-size: 10px;
+}
+.record-times {
+  gap: 6px;
+  font-size: 14px;
+}
+.record-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(70px, 1fr));
+  gap: 0;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--surface-muted);
+}
+.record-metrics > div {
+  min-height: 43px;
+  padding: 5px 9px;
+  border: 0;
+  border-inline-start: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  align-content: center;
+  gap: 1px;
+}
+.record-metrics > div:first-child {
+  border-inline-start: 0;
+}
+.record-metrics span {
+  font-size: 9px;
+}
+.record-metrics strong {
+  font-size: 14px;
+}
+.record-metrics .metric-primary {
+  background: color-mix(in srgb, var(--brand) 7%, var(--surface-muted));
+  border-color: var(--line);
+}
+.record-metrics .metric-primary strong {
+  font-size: 15px;
+}
+.record-metrics .metric-warning {
+  background: var(--warning-surface);
+}
+.record-break-details {
+  gap: 7px;
+  padding-top: 2px;
+  min-height: 22px;
+}
+.record-break-details > svg {
+  width: 15px;
+  height: 15px;
+}
+.record-break-details span,
+.record-note span {
+  font-size: 9px;
+}
+.record-break-details strong,
+.record-note strong {
+  font-size: 11px;
+}
+.record-note {
+  gap: 6px;
+}
+.record-tools {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  align-self: center;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 0;
+  margin: 0;
+  border: 0;
+}
+.record-tools button {
+  width: auto;
+  height: 34px;
+  min-width: 58px;
+  padding: 0 9px;
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.record-tools button svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* The fixed navigation should look like the bottom edge of the main app card,
+   not like a floating dock. */
+@media (min-width: 760px) {
+  .bottom-nav {
+    bottom: 36px;
+    width: min(1180px, calc(100% - 72px));
+    min-height: 66px;
+    padding: 7px 28px 8px;
+    background: var(--card-glass);
+    border: 1px solid var(--line);
+    border-top-color: var(--nav-line);
+    border-radius: 0 0 30px 30px;
+    box-shadow: none;
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+  }
+  .bottom-nav::before {
+    content: "";
+    position: absolute;
+    inset-inline: -1px;
+    top: -1px;
+    height: 1px;
+    background: var(--nav-line);
+  }
+  .bottom-nav button {
+    min-height: 48px;
+  }
+}
+
+@media (max-width: 760px) {
+  .record-card.record-card-actions {
+    grid-template-columns: 1fr auto;
+    grid-template-areas:
+      "main tools"
+      "metrics metrics"
+      "breaks breaks"
+      "note note";
+    gap: 8px 10px;
+    padding: 11px 12px;
+  }
+  .record-metrics {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  .record-metrics > div {
+    min-height: 40px;
+    padding: 4px 5px;
+  }
+  .record-tools {
+    justify-content: flex-start;
+  }
+  .record-tools button {
+    min-width: 34px;
+    width: 34px;
+    padding: 0;
+  }
+  .record-tools button span {
+    display: none;
+  }
+}
+
+@media (max-width: 430px) {
+  .record-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .record-metrics > div:nth-child(3) {
+    border-inline-start: 0;
+    border-top: 1px solid var(--line);
+  }
+  .record-metrics > div:nth-child(4) {
+    border-top: 1px solid var(--line);
+  }
+  .bottom-nav {
+    background: var(--card-glass);
+    border-top: 1px solid var(--nav-line);
+    box-shadow: none;
+  }
+}
