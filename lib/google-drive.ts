@@ -1611,9 +1611,12 @@ export async function deleteAttendanceEntry(
   entryId: string,
   location: { year: number; month: number }
 ) {
-  const workspace = await assertAttendanceWorkspace(workspaceId);
   const existing = await findEntryInMonth(workspaceId, entryId, location.year, location.month, false);
   if (!existing) return;
+
+  // resolveMonthSheet already read spreadsheet metadata while locating the row.
+  // Reuse the same document with one lightweight metadata lookup only for the
+  // numeric sheet id; avoid the extra Drive workspace validation on every delete.
   const metadata = await sheetsMetadata(existing.spreadsheetId);
   const sheet = metadata.sheets?.find((item) => item.properties.title === existing.sheetName);
   if (!sheet) throw new Error("הגיליון של הרשומה לא נמצא");
@@ -1629,5 +1632,5 @@ export async function deleteAttendanceEntry(
       },
     },
   ]);
-  if (workspace.appProperties?.activeEntryId === entryId) await setActiveShiftMetadata(workspaceId, null);
+  if (!existing.entry.clockOut) await setActiveShiftMetadata(workspaceId, null);
 }

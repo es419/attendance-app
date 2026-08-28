@@ -1076,13 +1076,40 @@ export default function Page() {
   async function deleteEntry(entry: AttendanceEntry) {
     if (!selectedFileId || !status?.connected || !online) return setMessage("מחיקת רשומה דורשת חיבור ל-Drive");
     if (!window.confirm(`למחוק את הרשומה של ${entry.date}? הפעולה תמחק את השורה מה-Google Sheet.`)) return;
-    setPendingAction("delete-entry");
+
+    // Optimistic delete: remove the card immediately. The Drive/Sheets write runs
+    // in the background, so the UI never waits for Google's round-trip latency.
+    const workspaceId = selectedFileId;
+    const year = entry.year || viewYear;
+    const month = entry.month || viewMonth;
+    const key = entryCacheKey(workspaceId, year, month);
+    const previous = readJson<AttendanceEntry[]>(key, entries);
+    const next = previous.filter((item) => item.id !== entry.id);
+    window.localStorage.setItem(key, JSON.stringify(next));
+    entriesFetchedAtRef.current.set(key, Date.now());
+    if (year === viewYear && month === viewMonth) setEntries(next);
+    if (activeShift?.id === entry.id) {
+      setActiveShift(null);
+      window.localStorage.removeItem(activeCacheKey(workspaceId));
+    }
+    setMessage("הרשומה נמחקה · מסנכרן ברקע");
+
     try {
-      const params = new URLSearchParams({ workspaceId: selectedFileId, year: String(entry.year || israelParts().year), month: String(entry.month || israelParts().month) });
+      const params = new URLSearchParams({ workspaceId, year: String(year), month: String(month) });
       await api(`/api/attendance/${encodeURIComponent(entry.id)}?${params.toString()}`, { method: "DELETE" });
-      await refreshCurrent(); setMessage("הרשומה נמחקה וסונכרנה");
-    } catch (error) { setMessage(error instanceof Error ? error.message : "לא ניתן למחוק רשומה"); }
-    finally { setPendingAction(null); }
+      // No full refresh here: the optimistic cache is already the desired state.
+      setMessage("הרשומה נמחקה וסונכרנה");
+    } catch (error) {
+      // A failed Google write must never silently lose a row. Restore the snapshot.
+      window.localStorage.setItem(key, JSON.stringify(previous));
+      entriesFetchedAtRef.current.delete(key);
+      if (year === viewYear && month === viewMonth) setEntries(previous);
+      if (activeShift?.id === entry.id) {
+        setActiveShift(entry);
+        window.localStorage.setItem(activeCacheKey(workspaceId), JSON.stringify(entry));
+      }
+      setMessage(error instanceof Error ? `המחיקה לא סונכרנה: ${error.message}` : "לא ניתן למחוק רשומה");
+    }
   }
 
   async function createFolderPath() {
@@ -1463,7 +1490,7 @@ export default function Page() {
 
       {createOpen && <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setCreateOpen(false)}><div className="modal-card"><div className="modal-title"><div><p className="eyebrow">Google Drive</p><h2>קובץ נוכחות חדש</h2></div><button className="icon-button compact" onClick={() => setCreateOpen(false)}><Icon name="close"/></button></div><label className="field-label">שם קובץ הנוכחות</label><input className="text-input" value={createName} onChange={(e) => setCreateName(e.target.value)} placeholder="לדוגמה: מס הכנסה" autoFocus/><label className="field-label">שם התיקייה</label><input className="text-input" value={createFolderName} onChange={(e) => setCreateFolderName(e.target.value)} placeholder="לדוגמה: עבודה"/><label className="field-label">תת־תיקייה <span className="optional-label">אופציונלי</span></label><input className="text-input" value={createSubfolderName} onChange={(e) => setCreateSubfolderName(e.target.value)} placeholder="לדוגמה: רשות המסים"/><div className="drive-preview"><span>הנתיב שייווצר</span><strong>נוכחות בעבודה / {createFolderName || "תיקייה"}{createSubfolderName ? ` / ${createSubfolderName}` : ""} / {createName || "קובץ נוכחות"}</strong></div><button className="primary-action modal-action" disabled={!createName.trim() || !createFolderName.trim() || pendingAction === "create"} onClick={() => void createFile()}>{pendingAction === "create" ? "יוצר ב-Drive…" : "צור וסנכרן"}</button></div></div>}
 
-      {manualOpen && <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setManualOpen(false)}><div className="modal-card"><div className="modal-title"><div><p className="eyebrow">משמרת ידנית</p><h2>הוספת שעות</h2></div><button className="icon-button compact" onClick={() => setManualOpen(false)}><Icon name="close"/></button></div><label className="field-label">תאריך</label><input className="text-input ltr-input" type="date" value={manualDate} onChange={(e) => setManualDate(e.target.value)}/><div className="two-fields"><div><label className="field-label">כניסה</label><input className="text-input ltr-input" type="time" value={manualStart} onChange={(e) => setManualStart(e.target.value)}/></div><div><label className="field-label">יציאה</label><input className="text-input ltr-input" type="time" value={manualEnd} onChange={(e) => setManualEnd(e.target.value)}/></div></div><label className="field-label">סה״כ דקות הפסקה</label><input className="text-input ltr-input" type="number" min="0" max="600" value={manualBreakMinutes} onChange={(e) => setManualBreakMinutes(e.target.value)}/><label className="field-label">הערה <span className="optional-label">אופציונלי</span></label><input className="text-input" value={manualNote} onChange={(e) => setManualNote(e.target.value)} placeholder="לדוגמה: עבודה מהבית"/><div className="break-policy-card"><Icon name="coffee"/><div><strong>כלל ההפסקה: {breakAllowanceMinutes} דקות</strong><span>{breakAllowanceMinutes === 0 ? "כל דקות ההפסקה ינוכו מזמן העבודה." : `רק דקות ההפסקה שמעבר ל־${breakAllowanceMinutes} דקות ינוכו מזמן העבודה.`}</span></div></div><button className="primary-action modal-action" disabled={!manualStart || !manualEnd} onClick={() => void addManual()}>{connected && online ? "שמור משמרת" : "שמור מקומית לסנכרון"}</button></div></div>}
+      {manualOpen && <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setManualOpen(false)}><div className="modal-card manual-modal"><div className="modal-title"><div><p className="eyebrow">משמרת ידנית</p><h2>הוספת שעות</h2></div><button className="icon-button compact" onClick={() => setManualOpen(false)}><Icon name="close"/></button></div><label className="field-label">תאריך</label><input className="text-input ltr-input" type="date" value={manualDate} onChange={(e) => setManualDate(e.target.value)}/><div className="two-fields"><div><label className="field-label">כניסה</label><input className="text-input ltr-input" type="time" value={manualStart} onChange={(e) => setManualStart(e.target.value)}/></div><div><label className="field-label">יציאה</label><input className="text-input ltr-input" type="time" value={manualEnd} onChange={(e) => setManualEnd(e.target.value)}/></div></div><label className="field-label">סה״כ דקות הפסקה</label><input className="text-input ltr-input" type="number" min="0" max="600" value={manualBreakMinutes} onChange={(e) => setManualBreakMinutes(e.target.value)}/><label className="field-label">הערה <span className="optional-label">אופציונלי</span></label><input className="text-input" value={manualNote} onChange={(e) => setManualNote(e.target.value)} placeholder="לדוגמה: עבודה מהבית"/><div className="break-policy-card"><Icon name="coffee"/><div><strong>כלל ההפסקה: {breakAllowanceMinutes} דקות</strong><span>{breakAllowanceMinutes === 0 ? "כל דקות ההפסקה ינוכו מזמן העבודה." : `רק דקות ההפסקה שמעבר ל־${breakAllowanceMinutes} דקות ינוכו מזמן העבודה.`}</span></div></div><button className="primary-action modal-action" disabled={!manualStart || !manualEnd} onClick={() => void addManual()}>{connected && online ? "שמור משמרת" : "שמור מקומית לסנכרון"}</button></div></div>}
 
       {editingEntry && <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setEditingEntry(null)}><div className="modal-card"><div className="modal-title"><div><p className="eyebrow">עריכת רשומה</p><h2>{editingEntry.date}</h2></div><button className="icon-button compact" onClick={() => setEditingEntry(null)}><Icon name="close"/></button></div><label className="field-label">תאריך</label><input className="text-input ltr-input" type="date" value={editDate} onChange={(e) => setEditDate(e.target.value)}/><div className="two-fields"><div><label className="field-label">כניסה</label><input className="text-input ltr-input" type="time" value={editStart} onChange={(e) => setEditStart(e.target.value)}/></div><div><label className="field-label">יציאה {editingEntry.clockOut ? "" : "(אופציונלי)"}</label><input className="text-input ltr-input" type="time" value={editEnd} onChange={(e) => setEditEnd(e.target.value)}/></div></div><label className="field-label">דקות הפסקה</label><input className="text-input ltr-input" type="number" min="0" value={editBreakMinutes} onChange={(e) => setEditBreakMinutes(e.target.value)}/><label className="field-label">הערה</label><input className="text-input" value={editNote} onChange={(e) => setEditNote(e.target.value)}/><p className="modal-note">עריכה מתבצעת ישירות מול שורת ה-Google Sheet. שינוי חודש/שנה יעביר את הרשומה לגיליון המתאים.</p><button className="primary-action modal-action" disabled={!connected || !online || !editDate || !editStart || Boolean(pendingAction)} onClick={() => void saveEntryEdit()}>שמור שינויים</button></div></div>}
 

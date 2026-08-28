@@ -1418,3 +1418,62 @@ h2 { margin: 0; font-size: 18px; letter-spacing: -.02em; }
   .payroll-deduction-list label { grid-template-columns: minmax(0, 1fr) 86px; }
   .payroll-addition-row { grid-template-columns: minmax(0, 1fr) 82px 32px; }
 }
+
+/* Manual shift form polish: iPhone first */
+.manual-modal {
+  width: min(420px, 100%);
+  overflow-x: hidden;
+}
+.manual-modal .field-label {
+  display: block;
+  margin: 1px 2px 0;
+  line-height: 1.2;
+}
+.manual-modal .text-input,
+.manual-modal .two-fields > div,
+.manual-modal input[type="date"],
+.manual-modal input[type="time"],
+.manual-modal input[type="number"] {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+.manual-modal input[type="date"],
+.manual-modal input[type="time"],
+.manual-modal input[type="number"] {
+  display: block;
+  width: 100%;
+  direction: ltr;
+  text-align: left;
+  font-variant-numeric: tabular-nums;
+}
+.manual-modal .two-fields {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+.manual-modal .two-fields > div {
+  overflow: hidden;
+}
+
+@media (max-width: 430px) {
+  .manual-modal {
+    width: min(100%, 380px);
+    padding: 16px;
+    gap: 10px;
+  }
+  .manual-modal .two-fields {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+  .manual-modal .text-input {
+    min-height: 47px;
+    height: 47px;
+    border-radius: 13px;
+    padding-inline: 12px;
+  }
+  .manual-modal .break-policy-card {
+    padding: 11px 12px;
+  }
+  .manual-modal .modal-action {
+    min-height: 50px;
+  }
+}
