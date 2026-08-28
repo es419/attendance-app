@@ -17,7 +17,7 @@ const SHEETS_API = "https://sheets.googleapis.com/v4";
 const ROOT_FOLDER_NAME = "נוכחות בעבודה";
 const FOLDER_MIME = "application/vnd.google-apps.folder";
 const SHEET_MIME = "application/vnd.google-apps.spreadsheet";
-const SCHEMA_VERSION = "7";
+const SCHEMA_VERSION = "8";
 const DEFAULT_BREAK_ALLOWANCE_MINUTES = 40;
 const DEFAULT_TARGET_HOURS = 120;
 const MAX_PAYROLL_ADDITIONS = 8;
@@ -1129,7 +1129,7 @@ async function initializeAttendanceSpreadsheet(spreadsheetId: string, isNew: boo
     if (sheet) monthSheets.push({ month, sheetName: sheet.properties.title, sheetId: sheet.properties.sheetId });
   }
 
-  const migrationRanges = monthSheets.map(({ sheetName }) => `'${sheetName.replace(/'/g, "''")}'!A2:P2000`);
+  const migrationRanges = monthSheets.map(({ sheetName }) => `'${sheetName.replace(/'/g, "''")}'!A2:Q2000`);
   const migrationRead = migrationRanges.length ? await batchGetValues(spreadsheetId, migrationRanges) : { valueRanges: [] };
   const valueWrites: Array<{ range: string; values: unknown[][] }> = [];
   const visualRequests: Record<string, unknown>[] = [];
@@ -1141,14 +1141,22 @@ async function initializeAttendanceSpreadsheet(spreadsheetId: string, isNew: boo
     // Migrate older rows without touching the original app data columns A:M.
     const rows = migrationRead.valueRanges?.[index]?.values || [];
     if (rows.length) {
-      const humanBreakColumns = rows.map((row) => {
+      const humanBreakColumns: unknown[][] = [];
+      rows.forEach((rawRow, rowIndex) => {
+        const shifted = !String(rawRow?.[0] || "") && looksLikeAttendanceId(rawRow?.[1]) && /^\d{2}\.\d{2}\.\d{4}$/.test(String(rawRow?.[2] || ""));
+        const row = normalizeAttendanceRow(rawRow || []);
+        if (shifted) {
+          const rowNumber = rowIndex + 2;
+          valueWrites.push({ range: `'${safeSheetName}'!A${rowNumber}:P${rowNumber}`, values: [row] });
+          valueWrites.push({ range: `'${safeSheetName}'!Q${rowNumber}`, values: [[""]] });
+        }
         const parsedBreaks = parseBreaks(row[9]);
         const totalBreakMinutes = Number(row[10] || 0) || breakMinutesAt(parsedBreaks, row[8] ? new Date(row[8]) : new Date());
-        return [
+        humanBreakColumns.push([
           breakSummary(parsedBreaks, totalBreakMinutes),
           breakExcessMinutes(totalBreakMinutes, breakAllowanceMinutes),
           breakAllowanceMinutes,
-        ];
+        ]);
       });
       valueWrites.push({ range: `'${safeSheetName}'!N2:P${rows.length + 1}`, values: humanBreakColumns });
     }
@@ -1350,7 +1358,47 @@ function breakSummary(breaks: AttendanceBreak[] = [], breakMinutes = 0) {
   return "ללא הפסקה";
 }
 
+function looksLikeAttendanceId(value: unknown) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ""));
+}
+
+function normalizeAttendanceRow(input: unknown[]): string[] {
+  const row = input.map((value) => String(value ?? ""));
+  // A previous append-based writer could let Sheets infer the logical table from
+  // column B, which shifted the whole record one cell to the left in the visible
+  // RTL sheet (weekday appeared under "כניסה", etc.). Detect that legacy shape
+  // and normalize it back to the canonical A:P schema.
+  if (!row[0] && looksLikeAttendanceId(row[1]) && /^\d{2}\.\d{2}\.\d{4}$/.test(row[2] || "")) {
+    return row.slice(1, 17).concat(Array(16).fill("")).slice(0, 16);
+  }
+  return row.concat(Array(16).fill("")).slice(0, 16);
+}
+
+async function writeAttendanceRow(
+  spreadsheetId: string,
+  sheetName: string,
+  row: unknown[],
+  knownRowCount?: number
+) {
+  let nextRow: number;
+  if (typeof knownRowCount === "number") {
+    nextRow = knownRowCount + 2;
+  } else {
+    const safe = sheetName.replace(/'/g, "''");
+    const existing = await getValues(spreadsheetId, `'${safe}'!A2:Q2000`);
+    const rows = existing.values || [];
+    let lastUsed = 0;
+    rows.forEach((values, index) => {
+      if ((values || []).some((value) => String(value ?? "").trim() !== "")) lastUsed = index + 1;
+    });
+    nextRow = lastUsed + 2;
+  }
+  const safe = sheetName.replace(/'/g, "''");
+  await updateValues(spreadsheetId, `'${safe}'!A${nextRow}:P${nextRow}`, [row]);
+}
+
 function rowToEntry(row: string[], year?: number, month?: number): AttendanceEntry {
+  row = normalizeAttendanceRow(row);
   const breaks = parseBreaks(row[9]);
   const storedBreakMinutes = Number(row[10] || 0);
   const gross = Number(row[11] || row[5] || 0);
@@ -1549,7 +1597,7 @@ export async function clockIn(
     id, local.dateDisplay, local.weekday, local.timeDisplay, "", 0, "", at.toISOString(), "", "[]", 0, 0, "quick",
     "ללא הפסקה", 0, breakAllowanceMinutes,
   ];
-  await appendValues(spreadsheetId, `'${sheetName.replace(/'/g, "''")}'!A:P`, [row]);
+  await writeAttendanceRow(spreadsheetId, sheetName, row, currentMonth?.rows.length);
   await setActiveShiftMetadata(workspaceId, { entryId: id, year: local.year, month: local.month, startedAt: at.toISOString() });
   return rowToEntry(row.map(String), local.year, local.month);
 }
@@ -1742,7 +1790,7 @@ export async function addManualShift(
   const sheetName = await resolveMonthSheet(spreadsheetId, localStart.month, true);
   if (!sheetName) throw new Error("לא ניתן לאתר את גיליון החודש");
   const row = entryRow({ id, start, end, breakMinutes: totalBreakMinutes, note: input.note, source: "manual", breakAllowanceMinutes });
-  await appendValues(spreadsheetId, `'${sheetName.replace(/'/g, "''")}'!A:P`, [row]);
+  await writeAttendanceRow(spreadsheetId, sheetName, row);
   return rowToEntry(row.map(String), localStart.year, localStart.month);
 }
 
@@ -1787,7 +1835,7 @@ export async function updateAttendanceEntry(
     const targetId = await ensureYearSpreadsheet(workspaceId, localStart.year);
     const targetSheet = await resolveMonthSheet(targetId, localStart.month, true);
     if (!targetSheet) throw new Error("לא ניתן לאתר את גיליון היעד");
-    await appendValues(targetId, `'${targetSheet.replace(/'/g, "''")}'!A:P`, [row]);
+    await writeAttendanceRow(targetId, targetSheet, row);
     await deleteAttendanceEntry(workspaceId, entryId, location);
   }
   if (end) await setActiveShiftMetadata(workspaceId, null);
