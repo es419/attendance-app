@@ -11,10 +11,10 @@ Mobile-first attendance PWA, optimized first for iPhone and responsive across de
 - Google Sheets API for attendance rows
 
 ## What is synchronized
-- Create a file in the app -> creates a real workspace folder in Google Drive.
+- Create a file in the app -> creates a real folder hierarchy in Google Drive: `נוכחות בעבודה / folder / optional subfolder / attendance file`.
 - Rename it in the app -> renames the same Drive folder.
 - Delete it in the app -> moves the same Drive folder to Google Drive Trash.
-- Create/rename/delete a workspace folder directly in the app root folder in Drive -> the app reflects it on focus and at most ~15 seconds later.
+- Rename, move, or delete the attendance workspace or its parent folders directly in Drive -> the app reflects the new path/state on focus and at most ~15 seconds later, as long as the workspace remains under `נוכחות בעבודה`.
 - First creation/first use creates `נוכחות YYYY` inside the workspace with 12 month tabs.
 - Clock-in/clock-out writes directly to the relevant Google Sheet. There is no second canonical database.
 
@@ -66,7 +66,7 @@ Then add exactly the same URI to the OAuth Client in Google Cloud.
 - OAuth client secret and refresh token never go to client-side JavaScript.
 - Refresh token is stored in an encrypted, HttpOnly cookie using `AUTH_SECRET`.
 - API routes refresh short-lived Google access tokens server-side.
-- Drive operations are constrained to workspaces directly inside the attendance root folder.
+- Drive operations are constrained to attendance workspaces anywhere inside the `נוכחות בעבודה` folder tree.
 
 ## iPhone details
 - `viewport-fit=cover`

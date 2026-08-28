@@ -12,9 +12,17 @@ export type AttendanceEntry = {
 export type AttendanceFile = {
   id: string;
   name: string;
+  folderPath?: string[];
+  parentId?: string;
   createdTime?: string;
   modifiedTime?: string;
   webViewLink?: string;
+};
+
+export type CreateAttendanceFileInput = {
+  name: string;
+  folderName: string;
+  subfolderName?: string;
 };
 
 export type DriveStatus = {

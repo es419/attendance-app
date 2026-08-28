@@ -51,6 +51,8 @@ export default function Page() {
   const [message, setMessage] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [createName, setCreateName] = useState("");
+  const [createFolderName, setCreateFolderName] = useState("");
+  const [createSubfolderName, setCreateSubfolderName] = useState("");
   const [menuFile, setMenuFile] = useState<AttendanceFile | null>(null);
 
   useEffect(() => {
@@ -176,20 +178,24 @@ export default function Page() {
 
   async function createFile() {
     const name = createName.trim();
-    if (!name || pendingAction) return;
+    const folderName = createFolderName.trim();
+    const subfolderName = createSubfolderName.trim();
+    if (!name || !folderName || pendingAction) return;
     setPendingAction("create");
     try {
       const data = await api<{ file: AttendanceFile }>("/api/drive/files", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name }),
+        body: JSON.stringify({ name, folderName, subfolderName: subfolderName || undefined }),
       });
       setCreateOpen(false);
       setCreateName("");
+      setCreateFolderName("");
+      setCreateSubfolderName("");
       await loadFiles();
       setSelectedFileId(data.file.id);
       setTab("home");
-      setMessage("הקובץ נוצר גם ב-Google Drive");
+      setMessage("התיקייה וקובץ הנוכחות נוצרו ב-Google Drive");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "לא ניתן ליצור קובץ");
     } finally {
@@ -374,7 +380,11 @@ export default function Page() {
             {files.map((file) => (
               <article className={`file-card ${selectedFileId === file.id ? "selected-file" : ""}`} key={file.id} onClick={() => { setSelectedFileId(file.id); setTab("home"); }}>
                 <div className="file-icon"><Icon name="files" /></div>
-                <div className="file-info"><strong>{file.name}</strong><span>{selectedFileId === file.id ? "קובץ פעיל · מסונכרן" : "מסונכרן עם Google Drive"}</span></div>
+                <div className="file-info">
+                  <strong>{file.name}</strong>
+                  <span className="file-path">{file.folderPath?.length ? `נוכחות בעבודה / ${file.folderPath.join(" / ")}` : "נוכחות בעבודה"}</span>
+                  <span>{selectedFileId === file.id ? "קובץ פעיל · מסונכרן" : "מסונכרן עם Google Drive"}</span>
+                </div>
                 <span className="sync-dot" title="מסונכרן" />
                 <button className="icon-button compact" aria-label={`אפשרויות ${file.name}`} onClick={(event) => { event.stopPropagation(); setMenuFile(file); }}><Icon name="more" /></button>
               </article>
@@ -396,10 +406,24 @@ export default function Page() {
         <div className="modal-backdrop" onMouseDown={() => !pendingAction && setCreateOpen(false)}>
           <section className="modal-card" onMouseDown={(event) => event.stopPropagation()}>
             <div className="modal-title"><div><p className="eyebrow">Google Drive</p><h2>קובץ נוכחות חדש</h2></div><button className="icon-button compact" onClick={() => setCreateOpen(false)} aria-label="סגור"><Icon name="close"/></button></div>
-            <label className="field-label" htmlFor="file-name">שם הקובץ</label>
-            <input id="file-name" className="text-input" autoFocus value={createName} onChange={(event) => setCreateName(event.target.value)} placeholder="לדוגמה: עבודה – מס הכנסה" onKeyDown={(event) => event.key === "Enter" && void createFile()} />
-            <p className="modal-note">תיווצר תיקייה אמיתית ב-Drive ובתוכה קובץ נוכחות לשנה הנוכחית עם 12 גיליונות.</p>
-            <button className="primary-action modal-action" disabled={!createName.trim() || pendingAction === "create"} onClick={() => void createFile()}>{pendingAction === "create" ? "יוצר ב-Drive…" : "צור קובץ"}</button>
+
+            <label className="field-label" htmlFor="file-name">שם קובץ הנוכחות</label>
+            <input id="file-name" className="text-input" autoFocus value={createName} onChange={(event) => setCreateName(event.target.value)} placeholder="לדוגמה: מס הכנסה" />
+
+            <label className="field-label" htmlFor="folder-name">שם התיקייה ב-Drive</label>
+            <input id="folder-name" className="text-input" value={createFolderName} onChange={(event) => setCreateFolderName(event.target.value)} placeholder="לדוגמה: עבודה" />
+
+            <label className="field-label" htmlFor="subfolder-name">תת-תיקייה <span className="optional-label">אופציונלי</span></label>
+            <input id="subfolder-name" className="text-input" value={createSubfolderName} onChange={(event) => setCreateSubfolderName(event.target.value)} placeholder="לדוגמה: רשות המסים" onKeyDown={(event) => event.key === "Enter" && void createFile()} />
+
+            <div className="drive-preview">
+              <span>הנתיב שייווצר</span>
+              <strong>נוכחות בעבודה / {createFolderName.trim() || "תיקייה"}{createSubfolderName.trim() ? ` / ${createSubfolderName.trim()}` : ""} / {createName.trim() || "קובץ נוכחות"}</strong>
+              <small>בתוך קובץ הנוכחות ייווצר אוטומטית Google Sheet בשם נוכחות {now.getFullYear()} עם 12 חודשי השנה.</small>
+            </div>
+
+            <p className="modal-note">התיקיות הן תיקיות Drive אמיתיות. שינוי שם, העברה או מחיקה ב-Drive יתעדכנו באפליקציה בסנכרון הבא.</p>
+            <button className="primary-action modal-action" disabled={!createName.trim() || !createFolderName.trim() || pendingAction === "create"} onClick={() => void createFile()}>{pendingAction === "create" ? "יוצר ב-Drive…" : "צור ב-Google Drive"}</button>
           </section>
         </div>
       )}

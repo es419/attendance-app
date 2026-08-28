@@ -141,3 +141,18 @@ h2 { margin: 0; font-size: 18px; letter-spacing: -.02em; }
   .bottom-sheet-backdrop { place-items: center; padding: 18px; }
   .bottom-sheet { border-radius: 24px; padding: 10px 16px 16px; }
 }
+
+/* Drive folder hierarchy */
+.file-path { color: #667085 !important; direction: rtl; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.optional-label { color: #98a2b3; font-weight: 700; margin-inline-start: 4px; }
+.drive-preview { display: grid; gap: 5px; padding: 12px 13px; border: 1px solid var(--line); border-radius: 15px; background: #f8fafc; }
+.drive-preview > span { color: var(--muted); font-size: 11px; font-weight: 800; }
+.drive-preview > strong { font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
+.drive-preview > small { color: var(--muted); font-size: 11px; line-height: 1.55; }
+.modal-card { max-height: min(760px, calc(100dvh - max(36px, env(safe-area-inset-top)) - max(36px, env(safe-area-inset-bottom)))); overflow-y: auto; overscroll-behavior: contain; }
+
+@media (max-width: 430px) {
+  .modal-card { border-radius: 22px; padding: 17px; gap: 10px; }
+  .text-input { min-height: 50px; }
+  .drive-preview { padding: 11px 12px; }
+}

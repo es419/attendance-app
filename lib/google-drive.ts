@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { getGoogleAccessToken, googleOAuthConfigured } from "./google-auth";
-import type { AttendanceEntry, AttendanceFile } from "./types";
+import type { AttendanceEntry, AttendanceFile, CreateAttendanceFileInput } from "./types";
 
 export const driveConfigured = googleOAuthConfigured;
 
@@ -97,40 +97,114 @@ export async function ensureRootFolder() {
   return created.id as string;
 }
 
+type FolderNode = {
+  id: string;
+  name: string;
+  parentId: string;
+  path: string[];
+  raw: Record<string, any>;
+};
+
+async function listChildFolders(parentId: string) {
+  const query = `'${qEscape(parentId)}' in parents and mimeType='${FOLDER_MIME}' and trashed=false`;
+  return (await driveList(query)).files;
+}
+
+async function listFolderTree(rootId: string) {
+  const nodes: FolderNode[] = [];
+  const queue: Array<{ id: string; path: string[]; depth: number }> = [{ id: rootId, path: [], depth: 0 }];
+  const visited = new Set<string>([rootId]);
+
+  while (queue.length) {
+    const current = queue.shift()!;
+    if (current.depth >= 8) continue;
+    const children = await listChildFolders(current.id);
+    for (const child of children) {
+      const id = String(child.id || "");
+      if (!id || visited.has(id)) continue;
+      visited.add(id);
+      const path = [...current.path, String(child.name || "")];
+      nodes.push({ id, name: String(child.name || ""), parentId: current.id, path, raw: child });
+      queue.push({ id, path, depth: current.depth + 1 });
+      if (nodes.length > 500) throw new Error("יש יותר מדי תיקיות תחת תיקיית הנוכחות");
+    }
+  }
+
+  return nodes;
+}
+
+async function ensureNamedFolder(parentId: string, name: string, kind: "container" | "subfolder") {
+  const cleanName = name.trim();
+  if (!cleanName) throw new Error("שם התיקייה לא יכול להיות ריק");
+  if (cleanName.length > 80) throw new Error("שם התיקייה ארוך מדי");
+
+  const query = `'${qEscape(parentId)}' in parents and mimeType='${FOLDER_MIME}' and name='${qEscape(cleanName)}' and trashed=false`;
+  const existing = await driveList(query);
+  if (existing.files[0]?.id) return existing.files[0];
+
+  return createDriveFile({
+    name: cleanName,
+    mimeType: FOLDER_MIME,
+    parents: [parentId],
+    appProperties: { attendanceApp: kind },
+  });
+}
+
 export async function listAttendanceFiles(): Promise<AttendanceFile[]> {
   const rootId = await ensureRootFolder();
-  const query = `'${qEscape(rootId)}' in parents and mimeType='${FOLDER_MIME}' and trashed=false`;
-  const result = await driveList(query);
-  return result.files.map((file) => ({
-    id: file.id,
-    name: file.name,
-    createdTime: file.createdTime,
-    modifiedTime: file.modifiedTime,
-    webViewLink: file.webViewLink,
-  }));
+  const nodes = await listFolderTree(rootId);
+  return nodes
+    .filter((node) => node.raw.appProperties?.attendanceApp === "workspace")
+    .map((node) => ({
+      id: node.id,
+      name: node.name,
+      folderPath: node.path.slice(0, -1),
+      parentId: node.parentId,
+      createdTime: node.raw.createdTime,
+      modifiedTime: node.raw.modifiedTime,
+      webViewLink: node.raw.webViewLink,
+    }))
+    .sort((a, b) => `${a.folderPath?.join("/") || ""}/${a.name}`.localeCompare(`${b.folderPath?.join("/") || ""}/${b.name}`, "he"));
 }
 
 export async function assertAttendanceWorkspace(workspaceId: string) {
   const rootId = await ensureRootFolder();
-  const file = await googleJson<Record<string, any>>(
-    `${DRIVE_API}/files/${encodeURIComponent(workspaceId)}?fields=id,name,mimeType,parents,trashed,webViewLink`
-  );
-  if (file.trashed || file.mimeType !== FOLDER_MIME || !file.parents?.includes(rootId)) {
-    throw new Error("תיק הנוכחות לא נמצא בתיקיית האפליקציה");
+  const nodes = await listFolderTree(rootId);
+  const node = nodes.find((item) => item.id === workspaceId);
+  if (!node || node.raw.appProperties?.attendanceApp !== "workspace") {
+    throw new Error("תיק הנוכחות לא נמצא בתוך תיקיית האפליקציה");
   }
-  return file;
+  return node.raw;
 }
 
-export async function createAttendanceFile(name: string): Promise<AttendanceFile> {
-  const cleanName = name.trim();
-  if (!cleanName) throw new Error("צריך לתת שם לקובץ");
-  if (cleanName.length > 80) throw new Error("השם ארוך מדי");
+export async function createAttendanceFile(input: CreateAttendanceFileInput): Promise<AttendanceFile> {
+  const cleanName = input.name.trim();
+  const folderName = input.folderName.trim();
+  const subfolderName = input.subfolderName?.trim() || "";
+  if (!cleanName) throw new Error("צריך לתת שם לקובץ הנוכחות");
+  if (!folderName) throw new Error("צריך לתת שם לתיקייה");
+  if (cleanName.length > 80 || folderName.length > 80 || subfolderName.length > 80) throw new Error("אחד השמות ארוך מדי");
 
   const rootId = await ensureRootFolder();
+  const folder = await ensureNamedFolder(rootId, folderName, "container");
+  let parent = folder;
+  const folderPath = [folderName];
+
+  if (subfolderName) {
+    parent = await ensureNamedFolder(String(folder.id), subfolderName, "subfolder");
+    folderPath.push(subfolderName);
+  }
+
+  const duplicateQuery = `'${qEscape(String(parent.id))}' in parents and mimeType='${FOLDER_MIME}' and name='${qEscape(cleanName)}' and trashed=false`;
+  const duplicate = await driveList(duplicateQuery);
+  if (duplicate.files.some((file) => file.appProperties?.attendanceApp === "workspace")) {
+    throw new Error("כבר קיים קובץ נוכחות בשם הזה בתיקייה שנבחרה");
+  }
+
   const created = await createDriveFile({
     name: cleanName,
     mimeType: FOLDER_MIME,
-    parents: [rootId],
+    parents: [String(parent.id)],
     appProperties: { attendanceApp: "workspace" },
   });
 
@@ -140,6 +214,8 @@ export async function createAttendanceFile(name: string): Promise<AttendanceFile
   return {
     id: created.id as string,
     name: created.name as string,
+    folderPath,
+    parentId: String(parent.id),
     createdTime: created.createdTime as string | undefined,
     modifiedTime: created.modifiedTime as string | undefined,
     webViewLink: created.webViewLink as string | undefined,

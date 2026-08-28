@@ -12,7 +12,11 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const file = await createAttendanceFile(String(body.name || ""));
+    const file = await createAttendanceFile({
+      name: String(body.name || ""),
+      folderName: String(body.folderName || ""),
+      subfolderName: body.subfolderName ? String(body.subfolderName) : undefined,
+    });
     return NextResponse.json({ file }, { status: 201 });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "לא ניתן ליצור קובץ" }, { status: 400 });
