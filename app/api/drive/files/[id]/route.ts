@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { moveAttendanceFile, renameAttendanceFile, trashAttendanceFile } from "@/lib/google-drive";
+import { moveAttendanceFile, renameAttendanceFile, trashAttendanceFile, updateBreakAllowanceMinutes } from "@/lib/google-drive";
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -8,6 +8,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     let result: unknown = null;
     if (typeof body.name === "string") result = await renameAttendanceFile(id, body.name);
     if (Array.isArray(body.folderPath)) result = await moveAttendanceFile(id, body.folderPath.map(String));
+    if (body.breakAllowanceMinutes !== undefined) result = await updateBreakAllowanceMinutes(id, Number(body.breakAllowanceMinutes));
     if (!result) return NextResponse.json({ error: "לא נשלח שינוי" }, { status: 400 });
     return NextResponse.json({ file: result });
   } catch (error) {

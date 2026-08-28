@@ -15,7 +15,8 @@ const SHEETS_API = "https://sheets.googleapis.com/v4";
 const ROOT_FOLDER_NAME = "נוכחות בעבודה";
 const FOLDER_MIME = "application/vnd.google-apps.folder";
 const SHEET_MIME = "application/vnd.google-apps.spreadsheet";
-const SCHEMA_VERSION = "3";
+const SCHEMA_VERSION = "5";
+const DEFAULT_BREAK_ALLOWANCE_MINUTES = 40;
 
 export const MONTHS_HE = [
   "ינואר",
@@ -38,14 +39,17 @@ const HEADERS = [
   "יום",
   "כניסה",
   "יציאה",
-  "דקות לחיוב",
+  "דקות עבודה בפועל",
   "הערה",
   "כניסה ISO",
   "יציאה ISO",
   "הפסקות JSON",
-  "דקות הפסקה",
-  "דקות ברוטו",
+  "סה״כ הפסקה (דק׳)",
+  "דקות משמרת ברוטו",
   "מקור",
+  "פירוט הפסקות",
+  "דקות חריגה",
+  "כלל הפסקה (דק׳)",
 ];
 
 function qEscape(value: string) {
@@ -183,11 +187,27 @@ async function resolveParentPath(parentId: string | undefined, appRootId: string
   return { path, insideRoot };
 }
 
+function normalizeBreakAllowance(value: unknown, fallback = DEFAULT_BREAK_ALLOWANCE_MINUTES) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(0, Math.min(600, Math.floor(parsed)));
+}
+
+function breakAllowanceFromWorkspace(file: DriveFile) {
+  return normalizeBreakAllowance(file.appProperties?.breakAllowanceMinutes);
+}
+
 async function ensureWorkspaceMetadata(file: DriveFile) {
   const workspaceKey = file.appProperties?.workspaceKey || randomUUID();
-  const desired = managedProps("workspace", { workspaceKey });
   const props = file.appProperties || {};
-  if (props.attendanceSchema !== SCHEMA_VERSION || props.workspaceKey !== workspaceKey || props.attendanceApp !== "workspace") {
+  const breakAllowanceMinutes = String(normalizeBreakAllowance(props.breakAllowanceMinutes));
+  const desired = managedProps("workspace", { workspaceKey, breakAllowanceMinutes });
+  if (
+    props.attendanceSchema !== SCHEMA_VERSION ||
+    props.workspaceKey !== workspaceKey ||
+    props.attendanceApp !== "workspace" ||
+    props.breakAllowanceMinutes !== breakAllowanceMinutes
+  ) {
     return patchDriveFile(file.id, { appProperties: { ...props, ...desired } });
   }
   return file;
@@ -252,6 +272,7 @@ export async function listAttendanceFiles(): Promise<AttendanceFile[]> {
         createdTime: workspace.createdTime,
         modifiedTime: workspace.modifiedTime,
         webViewLink: workspace.webViewLink,
+        breakAllowanceMinutes: breakAllowanceFromWorkspace(workspace),
       } satisfies AttendanceFile;
     })
   );
@@ -264,6 +285,23 @@ export async function assertAttendanceWorkspace(workspaceId: string) {
     throw new Error("תיק הנוכחות לא נמצא או נמחק ב-Google Drive");
   }
   return ensureWorkspaceMetadata(file);
+}
+
+async function setActiveShiftMetadata(
+  workspaceId: string,
+  active: { entryId: string; year: number; month: number; startedAt: string } | null
+) {
+  const workspace = await assertAttendanceWorkspace(workspaceId);
+  const props = workspace.appProperties || {};
+  const activeProps = active
+    ? {
+        activeEntryId: active.entryId,
+        activeEntryYear: String(active.year),
+        activeEntryMonth: String(active.month),
+        activeEntryStartedAt: active.startedAt,
+      }
+    : { activeEntryId: "", activeEntryYear: "", activeEntryMonth: "", activeEntryStartedAt: "" };
+  return patchDriveFile(workspaceId, { appProperties: { ...props, ...activeProps } });
 }
 
 async function ensureNamedFolder(parentId: string, name: string) {
@@ -322,7 +360,7 @@ export async function createAttendanceFile(input: CreateAttendanceFileInput): Pr
     name: cleanName,
     mimeType: FOLDER_MIME,
     parents: [target.parentId],
-    appProperties: managedProps("workspace", { workspaceKey }),
+    appProperties: managedProps("workspace", { workspaceKey, breakAllowanceMinutes: String(DEFAULT_BREAK_ALLOWANCE_MINUTES) }),
   });
 
   const now = israelNow();
@@ -338,6 +376,7 @@ export async function createAttendanceFile(input: CreateAttendanceFileInput): Pr
     createdTime: created.createdTime,
     modifiedTime: created.modifiedTime,
     webViewLink: created.webViewLink,
+    breakAllowanceMinutes: DEFAULT_BREAK_ALLOWANCE_MINUTES,
   };
 }
 
@@ -362,6 +401,59 @@ export async function moveAttendanceFile(workspaceId: string, pathParts: string[
 export async function trashAttendanceFile(workspaceId: string) {
   await assertAttendanceWorkspace(workspaceId);
   await patchDriveFile(workspaceId, { trashed: true });
+}
+
+async function recalculateWorkspaceDurations(workspaceId: string, allowanceMinutes: number) {
+  const yearFiles = await driveList(
+    `mimeType='${SHEET_MIME}' and trashed=false and appProperties has { key='attendanceApp' and value='year' } and appProperties has { key='attendanceWorkspaceId' and value='${qEscape(workspaceId)}' }`,
+    "modifiedTime desc"
+  );
+
+  for (const yearFile of yearFiles.files) {
+    for (let month = 1; month <= 12; month++) {
+      const sheetName = await resolveMonthSheet(yearFile.id, month, false);
+      if (!sheetName) continue;
+      const safeName = sheetName.replace(/'/g, "''");
+      const response = await getValues(yearFile.id, `'${safeName}'!A2:P2000`);
+      const updates: Array<{ range: string; values: unknown[][] }> = [];
+
+      for (let index = 0; index < (response.values || []).length; index++) {
+        const row = response.values![index] || [];
+        if (!row[0] || !row[4]) continue;
+        const parsedBreaks = parseBreaks(row[9]);
+        const breakMinutes = Number(row[10] || 0) || breakMinutesAt(parsedBreaks, row[8] ? new Date(row[8]) : new Date());
+        let grossMinutes = Number(row[11] || 0);
+        if (!grossMinutes && row[7] && row[8]) {
+          const start = Date.parse(row[7]);
+          const end = Date.parse(row[8]);
+          if (Number.isFinite(start) && Number.isFinite(end) && end > start) grossMinutes = Math.floor((end - start) / 60000);
+        }
+        if (!grossMinutes) continue;
+        const next = creditedMinutes(grossMinutes, breakMinutes, allowanceMinutes);
+        const excess = breakExcessMinutes(breakMinutes, allowanceMinutes);
+        if (Number(row[5] || 0) !== next) {
+          updates.push({ range: `'${safeName}'!F${index + 2}`, values: [[next]] });
+        }
+        if (Number(row[14] || 0) !== excess || Number(row[15] ?? -1) !== allowanceMinutes) {
+          updates.push({ range: `'${safeName}'!O${index + 2}:P${index + 2}`, values: [[excess, allowanceMinutes]] });
+        }
+        const summary = breakSummary(parsedBreaks, breakMinutes);
+        if (String(row[13] || "") !== summary) {
+          updates.push({ range: `'${safeName}'!N${index + 2}`, values: [[summary]] });
+        }
+      }
+      if (updates.length) await batchUpdateValues(yearFile.id, updates);
+    }
+  }
+}
+
+export async function updateBreakAllowanceMinutes(workspaceId: string, value: number) {
+  const workspace = await assertAttendanceWorkspace(workspaceId);
+  const minutes = normalizeBreakAllowance(value);
+  const props = workspace.appProperties || {};
+  await patchDriveFile(workspaceId, { appProperties: { ...props, breakAllowanceMinutes: String(minutes) } });
+  await recalculateWorkspaceDurations(workspaceId, minutes);
+  return { breakAllowanceMinutes: minutes };
 }
 
 async function listFolderTree(rootId: string) {
@@ -581,10 +673,90 @@ async function initializeAttendanceSpreadsheet(spreadsheetId: string, isNew: boo
   }
   if (metadataRequests.length) await sheetsBatchUpdate(spreadsheetId, metadataRequests);
 
+  const yearFile = await getDriveFile(spreadsheetId);
+  let breakAllowanceMinutes = DEFAULT_BREAK_ALLOWANCE_MINUTES;
+  const workspaceId = yearFile.appProperties?.attendanceWorkspaceId;
+  if (workspaceId) {
+    try {
+      breakAllowanceMinutes = breakAllowanceFromWorkspace(await getDriveFile(workspaceId));
+    } catch {
+      breakAllowanceMinutes = DEFAULT_BREAK_ALLOWANCE_MINUTES;
+    }
+  }
+
+  const visualRequests: Record<string, unknown>[] = [];
   for (let month = 1; month <= 12; month++) {
     const sheetName = await resolveMonthSheet(spreadsheetId, month, false);
-    if (sheetName) await updateValues(spreadsheetId, `'${sheetName.replace(/'/g, "''")}'!A1:M1`, [HEADERS]);
+    if (!sheetName) continue;
+    const safeSheetName = sheetName.replace(/'/g, "''");
+    await updateValues(spreadsheetId, `'${safeSheetName}'!A1:P1`, [HEADERS]);
+
+    // Migrate older rows without touching the original app data columns A:M.
+    const existing = await getValues(spreadsheetId, `'${safeSheetName}'!A2:P2000`);
+    const rows = existing.values || [];
+    if (rows.length) {
+      const humanBreakColumns = rows.map((row) => {
+        const parsedBreaks = parseBreaks(row[9]);
+        const totalBreakMinutes = Number(row[10] || 0) || breakMinutesAt(parsedBreaks, row[8] ? new Date(row[8]) : new Date());
+        return [
+          breakSummary(parsedBreaks, totalBreakMinutes),
+          breakExcessMinutes(totalBreakMinutes, breakAllowanceMinutes),
+          breakAllowanceMinutes,
+        ];
+      });
+      await updateValues(spreadsheetId, `'${safeSheetName}'!N2:P${rows.length + 1}`, humanBreakColumns);
+    }
+
+    const sheet = metadata.sheets?.find((item) => item.properties.title === sheetName);
+    if (!sheet) continue;
+    const sheetId = sheet.properties.sheetId;
+    visualRequests.push(
+      {
+        updateSheetProperties: {
+          properties: { sheetId, rightToLeft: true, gridProperties: { frozenRowCount: 1 } },
+          fields: "rightToLeft,gridProperties.frozenRowCount",
+        },
+      },
+      {
+        repeatCell: {
+          range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 16 },
+          cell: { userEnteredFormat: { textFormat: { bold: true }, horizontalAlignment: "CENTER", wrapStrategy: "WRAP" } },
+          fields: "userEnteredFormat(textFormat,horizontalAlignment,wrapStrategy)",
+        },
+      },
+      // Technical columns remain available to the app but stay out of the human-facing view.
+      {
+        updateDimensionProperties: {
+          range: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: 1 },
+          properties: { hiddenByUser: true },
+          fields: "hiddenByUser",
+        },
+      },
+      {
+        updateDimensionProperties: {
+          range: { sheetId, dimension: "COLUMNS", startIndex: 7, endIndex: 10 },
+          properties: { hiddenByUser: true },
+          fields: "hiddenByUser",
+        },
+      },
+      {
+        updateDimensionProperties: {
+          range: { sheetId, dimension: "COLUMNS", startIndex: 12, endIndex: 13 },
+          properties: { hiddenByUser: true },
+          fields: "hiddenByUser",
+        },
+      },
+      { updateDimensionProperties: { range: { sheetId, dimension: "COLUMNS", startIndex: 1, endIndex: 2 }, properties: { pixelSize: 100 }, fields: "pixelSize" } },
+      { updateDimensionProperties: { range: { sheetId, dimension: "COLUMNS", startIndex: 2, endIndex: 3 }, properties: { pixelSize: 90 }, fields: "pixelSize" } },
+      { updateDimensionProperties: { range: { sheetId, dimension: "COLUMNS", startIndex: 3, endIndex: 5 }, properties: { pixelSize: 75 }, fields: "pixelSize" } },
+      { updateDimensionProperties: { range: { sheetId, dimension: "COLUMNS", startIndex: 5, endIndex: 6 }, properties: { pixelSize: 115 }, fields: "pixelSize" } },
+      { updateDimensionProperties: { range: { sheetId, dimension: "COLUMNS", startIndex: 6, endIndex: 7 }, properties: { pixelSize: 180 }, fields: "pixelSize" } },
+      { updateDimensionProperties: { range: { sheetId, dimension: "COLUMNS", startIndex: 10, endIndex: 12 }, properties: { pixelSize: 105 }, fields: "pixelSize" } },
+      { updateDimensionProperties: { range: { sheetId, dimension: "COLUMNS", startIndex: 13, endIndex: 14 }, properties: { pixelSize: 220 }, fields: "pixelSize" } },
+      { updateDimensionProperties: { range: { sheetId, dimension: "COLUMNS", startIndex: 14, endIndex: 16 }, properties: { pixelSize: 105 }, fields: "pixelSize" } }
+    );
   }
+  if (visualRequests.length) await sheetsBatchUpdate(spreadsheetId, visualRequests);
 }
 
 async function resolveMonthSheet(spreadsheetId: string, month: number, createIfMissing = true): Promise<string | null> {
@@ -715,8 +887,23 @@ function breakMinutesAt(breaks: AttendanceBreak[], at = new Date()) {
   }, 0);
 }
 
-function creditedMinutes(grossMinutes: number, breakMinutes: number) {
-  return Math.max(0, grossMinutes - Math.max(0, breakMinutes - 40));
+function breakExcessMinutes(breakMinutes: number, breakAllowanceMinutes = DEFAULT_BREAK_ALLOWANCE_MINUTES) {
+  const allowance = normalizeBreakAllowance(breakAllowanceMinutes);
+  return Math.max(0, Math.max(0, breakMinutes) - allowance);
+}
+
+function creditedMinutes(grossMinutes: number, breakMinutes: number, breakAllowanceMinutes = DEFAULT_BREAK_ALLOWANCE_MINUTES) {
+  return Math.max(0, grossMinutes - breakExcessMinutes(breakMinutes, breakAllowanceMinutes));
+}
+
+function breakSummary(breaks: AttendanceBreak[] = [], breakMinutes = 0) {
+  if (breaks.length) {
+    return breaks
+      .map((item) => `${item.start || "?"}–${item.end || "פעילה"}`)
+      .join(", ");
+  }
+  if (breakMinutes > 0) return `${breakMinutes} דק׳ (ידני)`;
+  return "ללא הפסקה";
 }
 
 function rowToEntry(row: string[], year?: number, month?: number): AttendanceEntry {
@@ -754,7 +941,7 @@ async function readMonthRows(workspaceId: string, year: number, month: number, c
   const sheetName = await resolveMonthSheet(spreadsheetId, month, true);
   if (!sheetName) return null;
   const safeSheetName = sheetName.replace(/'/g, "''");
-  const response = await getValues(spreadsheetId, `'${safeSheetName}'!A2:M2000`);
+  const response = await getValues(spreadsheetId, `'${safeSheetName}'!A2:P2000`);
   const rows = (response.values || []).map((row, index) => ({
     rowNumber: index + 2,
     raw: row,
@@ -803,6 +990,59 @@ async function findOpenEntry(workspaceId: string, now = new Date()) {
   return null;
 }
 
+async function findOpenEntryGlobal(workspaceId: string, now = new Date()) {
+  const recent = await findOpenEntry(workspaceId, now);
+  if (recent) return recent;
+
+  const yearFiles = await driveList(
+    `mimeType='${SHEET_MIME}' and trashed=false and appProperties has { key='attendanceApp' and value='year' } and appProperties has { key='attendanceWorkspaceId' and value='${qEscape(workspaceId)}' }`,
+    "modifiedTime desc"
+  );
+  const years = Array.from(new Set(yearFiles.files
+    .map((file) => Number(file.appProperties?.attendanceYear || 0))
+    .filter((year) => Number.isInteger(year) && year >= 2000 && year <= 2100)))
+    .sort((a, b) => b - a);
+
+  for (const year of years) {
+    for (let month = 12; month >= 1; month--) {
+      const monthData = await readMonthRows(workspaceId, year, month, false);
+      if (!monthData) continue;
+      for (let index = monthData.rows.length - 1; index >= 0; index--) {
+        const row = monthData.rows[index];
+        if (row.entry.id && !row.entry.clockOut && row.entry.clockInIso) return { ...monthData, ...row };
+      }
+    }
+  }
+  return null;
+}
+
+export async function getActiveAttendanceEntry(workspaceId: string) {
+  const workspace = await assertAttendanceWorkspace(workspaceId);
+  const props = workspace.appProperties || {};
+  const entryId = props.activeEntryId || "";
+  const year = Number(props.activeEntryYear || 0);
+  const month = Number(props.activeEntryMonth || 0);
+
+  if (entryId && Number.isInteger(year) && Number.isInteger(month) && month >= 1 && month <= 12) {
+    const exact = await findEntryInMonth(workspaceId, entryId, year, month, false);
+    if (exact?.entry && !exact.entry.clockOut) return exact.entry;
+  }
+
+  const open = await findOpenEntryGlobal(workspaceId);
+  if (open?.entry) {
+    await setActiveShiftMetadata(workspaceId, {
+      entryId: open.entry.id,
+      year: open.year,
+      month: open.month,
+      startedAt: open.entry.clockInIso || new Date().toISOString(),
+    });
+    return open.entry;
+  }
+
+  if (entryId) await setActiveShiftMetadata(workspaceId, null);
+  return null;
+}
+
 async function resolveTargetEntry(
   workspaceId: string,
   options: { entryId?: string; year?: number; month?: number; at?: Date } = {}
@@ -818,7 +1058,8 @@ export async function clockIn(
   workspaceId: string,
   options: { atIso?: string; entryId?: string } = {}
 ) {
-  await assertAttendanceWorkspace(workspaceId);
+  const workspace = await assertAttendanceWorkspace(workspaceId);
+  const breakAllowanceMinutes = breakAllowanceFromWorkspace(workspace);
   const at = options.atIso ? new Date(options.atIso) : new Date();
   if (!Number.isFinite(at.getTime())) throw new Error("זמן הכניסה לא תקין");
   const local = israelNow(at);
@@ -826,17 +1067,24 @@ export async function clockIn(
 
   if (options.entryId) {
     const duplicate = await findEntryInMonth(workspaceId, id, local.year, local.month, false);
-    if (duplicate) return duplicate.entry;
+    if (duplicate) {
+      if (!duplicate.entry.clockOut) await setActiveShiftMetadata(workspaceId, { entryId: id, year: local.year, month: local.month, startedAt: duplicate.entry.clockInIso || at.toISOString() });
+      return duplicate.entry;
+    }
   }
 
-  const existing = await findOpenEntry(workspaceId, at);
+  const existing = await findOpenEntryGlobal(workspaceId, at);
   if (existing) throw new Error("כבר קיימת כניסה פתוחה");
 
   const spreadsheetId = await ensureYearSpreadsheet(workspaceId, local.year);
   const sheetName = await resolveMonthSheet(spreadsheetId, local.month, true);
   if (!sheetName) throw new Error("לא ניתן לאתר את גיליון החודש");
-  const row = [id, local.dateDisplay, local.weekday, local.timeDisplay, "", 0, "", at.toISOString(), "", "[]", 0, 0, "quick"];
-  await appendValues(spreadsheetId, `'${sheetName.replace(/'/g, "''")}'!A:M`, [row]);
+  const row = [
+    id, local.dateDisplay, local.weekday, local.timeDisplay, "", 0, "", at.toISOString(), "", "[]", 0, 0, "quick",
+    "ללא הפסקה", 0, breakAllowanceMinutes,
+  ];
+  await appendValues(spreadsheetId, `'${sheetName.replace(/'/g, "''")}'!A:P`, [row]);
+  await setActiveShiftMetadata(workspaceId, { entryId: id, year: local.year, month: local.month, startedAt: at.toISOString() });
   return rowToEntry(row.map(String), local.year, local.month);
 }
 
@@ -844,7 +1092,8 @@ export async function startBreak(
   workspaceId: string,
   options: { atIso?: string; entryId?: string; year?: number; month?: number; breakId?: string } = {}
 ) {
-  await assertAttendanceWorkspace(workspaceId);
+  const workspace = await assertAttendanceWorkspace(workspaceId);
+  const breakAllowanceMinutes = breakAllowanceFromWorkspace(workspace);
   const at = options.atIso ? new Date(options.atIso) : new Date();
   if (!Number.isFinite(at.getTime())) throw new Error("זמן ההפסקה לא תקין");
   const open = await resolveTargetEntry(workspaceId, { ...options, at });
@@ -861,6 +1110,7 @@ export async function startBreak(
   await batchUpdateValues(open.spreadsheetId, [
     { range: `'${open.sheetName.replace(/'/g, "''")}'!J${open.rowNumber}`, values: [[JSON.stringify(breaks)]] },
     { range: `'${open.sheetName.replace(/'/g, "''")}'!K${open.rowNumber}`, values: [[completedBreakMinutes]] },
+    { range: `'${open.sheetName.replace(/'/g, "''")}'!N${open.rowNumber}:P${open.rowNumber}`, values: [[breakSummary(breaks, completedBreakMinutes), breakExcessMinutes(completedBreakMinutes, breakAllowanceMinutes), breakAllowanceMinutes]] },
   ]);
   return { ...open.entry, breaks, breakMinutes: completedBreakMinutes } satisfies AttendanceEntry;
 }
@@ -869,7 +1119,8 @@ export async function endBreak(
   workspaceId: string,
   options: { atIso?: string; entryId?: string; year?: number; month?: number; breakId?: string } = {}
 ) {
-  await assertAttendanceWorkspace(workspaceId);
+  const workspace = await assertAttendanceWorkspace(workspaceId);
+  const breakAllowanceMinutes = breakAllowanceFromWorkspace(workspace);
   const at = options.atIso ? new Date(options.atIso) : new Date();
   if (!Number.isFinite(at.getTime())) throw new Error("זמן החזרה מהפסקה לא תקין");
   const open = await resolveTargetEntry(workspaceId, { ...options, at });
@@ -886,6 +1137,7 @@ export async function endBreak(
   await batchUpdateValues(open.spreadsheetId, [
     { range: `'${open.sheetName.replace(/'/g, "''")}'!J${open.rowNumber}`, values: [[JSON.stringify(breaks)]] },
     { range: `'${open.sheetName.replace(/'/g, "''")}'!K${open.rowNumber}`, values: [[totalBreakMinutes]] },
+    { range: `'${open.sheetName.replace(/'/g, "''")}'!N${open.rowNumber}:P${open.rowNumber}`, values: [[breakSummary(breaks, totalBreakMinutes), breakExcessMinutes(totalBreakMinutes, breakAllowanceMinutes), breakAllowanceMinutes]] },
   ]);
   return { ...open.entry, breaks, breakMinutes: totalBreakMinutes } satisfies AttendanceEntry;
 }
@@ -894,12 +1146,16 @@ export async function clockOut(
   workspaceId: string,
   options: { atIso?: string; entryId?: string; year?: number; month?: number } = {}
 ) {
-  await assertAttendanceWorkspace(workspaceId);
+  const workspace = await assertAttendanceWorkspace(workspaceId);
+  const breakAllowanceMinutes = breakAllowanceFromWorkspace(workspace);
   const at = options.atIso ? new Date(options.atIso) : new Date();
   if (!Number.isFinite(at.getTime())) throw new Error("זמן היציאה לא תקין");
   const open = await resolveTargetEntry(workspaceId, { ...options, at });
   if (!open) throw new Error("אין כניסה פתוחה לסגירה");
-  if (open.entry.clockOut) return open.entry;
+  if (open.entry.clockOut) {
+    await setActiveShiftMetadata(workspaceId, null);
+    return open.entry;
+  }
 
   const local = israelNow(at);
   const startMs = Date.parse(open.entry.clockInIso!);
@@ -909,7 +1165,7 @@ export async function clockOut(
   const openBreakIndex = breaks.findLastIndex((item) => !item.endIso);
   if (openBreakIndex >= 0) breaks[openBreakIndex] = { ...breaks[openBreakIndex], end: local.timeDisplay, endIso: at.toISOString() };
   const totalBreakMinutes = breakMinutesAt(breaks, at);
-  const durationMinutes = creditedMinutes(grossDurationMinutes, totalBreakMinutes);
+  const durationMinutes = creditedMinutes(grossDurationMinutes, totalBreakMinutes, breakAllowanceMinutes);
 
   await batchUpdateValues(open.spreadsheetId, [
     { range: `'${open.sheetName.replace(/'/g, "''")}'!E${open.rowNumber}`, values: [[local.timeDisplay]] },
@@ -918,7 +1174,9 @@ export async function clockOut(
     { range: `'${open.sheetName.replace(/'/g, "''")}'!J${open.rowNumber}`, values: [[JSON.stringify(breaks)]] },
     { range: `'${open.sheetName.replace(/'/g, "''")}'!K${open.rowNumber}`, values: [[totalBreakMinutes]] },
     { range: `'${open.sheetName.replace(/'/g, "''")}'!L${open.rowNumber}`, values: [[grossDurationMinutes]] },
+    { range: `'${open.sheetName.replace(/'/g, "''")}'!N${open.rowNumber}:P${open.rowNumber}`, values: [[breakSummary(breaks, totalBreakMinutes), breakExcessMinutes(totalBreakMinutes, breakAllowanceMinutes), breakAllowanceMinutes]] },
   ]);
+  await setActiveShiftMetadata(workspaceId, null);
 
   return {
     ...open.entry,
@@ -963,11 +1221,12 @@ function entryRow(input: {
   note?: string;
   source: "manual" | "quick";
   breaks?: AttendanceBreak[];
+  breakAllowanceMinutes?: number;
 }) {
   const localStart = israelNow(input.start);
   const localEnd = input.end ? israelNow(input.end) : null;
   const grossDurationMinutes = input.end ? Math.max(1, Math.floor((input.end.getTime() - input.start.getTime()) / 60000)) : 0;
-  const durationMinutes = input.end ? creditedMinutes(grossDurationMinutes, input.breakMinutes) : 0;
+  const durationMinutes = input.end ? creditedMinutes(grossDurationMinutes, input.breakMinutes, input.breakAllowanceMinutes) : 0;
   return [
     input.id,
     localStart.dateDisplay,
@@ -982,6 +1241,9 @@ function entryRow(input: {
     input.breakMinutes,
     grossDurationMinutes,
     input.source,
+    breakSummary(input.breaks || [], input.breakMinutes),
+    breakExcessMinutes(input.breakMinutes, input.breakAllowanceMinutes),
+    normalizeBreakAllowance(input.breakAllowanceMinutes),
   ];
 }
 
@@ -989,7 +1251,8 @@ export async function addManualShift(
   workspaceId: string,
   input: { date: string; clockIn: string; clockOut: string; breakMinutes?: number; note?: string; entryId?: string }
 ) {
-  await assertAttendanceWorkspace(workspaceId);
+  const workspace = await assertAttendanceWorkspace(workspaceId);
+  const breakAllowanceMinutes = breakAllowanceFromWorkspace(workspace);
   const start = localIsraelDateTimeToDate(input.date, input.clockIn);
   let end = localIsraelDateTimeToDate(input.date, input.clockOut);
   if (end.getTime() <= start.getTime()) end = new Date(end.getTime() + 24 * 60 * 60 * 1000);
@@ -1012,8 +1275,8 @@ export async function addManualShift(
   const spreadsheetId = await ensureYearSpreadsheet(workspaceId, localStart.year);
   const sheetName = await resolveMonthSheet(spreadsheetId, localStart.month, true);
   if (!sheetName) throw new Error("לא ניתן לאתר את גיליון החודש");
-  const row = entryRow({ id, start, end, breakMinutes: totalBreakMinutes, note: input.note, source: "manual" });
-  await appendValues(spreadsheetId, `'${sheetName.replace(/'/g, "''")}'!A:M`, [row]);
+  const row = entryRow({ id, start, end, breakMinutes: totalBreakMinutes, note: input.note, source: "manual", breakAllowanceMinutes });
+  await appendValues(spreadsheetId, `'${sheetName.replace(/'/g, "''")}'!A:P`, [row]);
   return rowToEntry(row.map(String), localStart.year, localStart.month);
 }
 
@@ -1023,7 +1286,8 @@ export async function updateAttendanceEntry(
   location: { year: number; month: number },
   input: { date: string; clockIn: string; clockOut?: string; breakMinutes?: number; note?: string }
 ) {
-  await assertAttendanceWorkspace(workspaceId);
+  const workspace = await assertAttendanceWorkspace(workspaceId);
+  const breakAllowanceMinutes = breakAllowanceFromWorkspace(workspace);
   const existing = await findEntryInMonth(workspaceId, entryId, location.year, location.month, false);
   if (!existing) throw new Error("הרשומה לא נמצאה. ייתכן שהיא שונתה ידנית ב-Drive; סנכרן ונסה שוב");
 
@@ -1038,6 +1302,8 @@ export async function updateAttendanceEntry(
   const breaks = Math.max(0, Math.floor(Number(input.breakMinutes ?? existing.entry.breakMinutes ?? 0)));
   if (end && breaks >= gross) throw new Error("זמן ההפסקה לא יכול להיות ארוך מהמשמרת");
   const localStart = israelNow(start);
+  const existingBreakMinutes = Math.max(0, Math.floor(Number(existing.entry.breakMinutes || 0)));
+  const keepDetailedBreaks = Boolean(existing.entry.breaks?.length) && breaks === existingBreakMinutes;
   const row = entryRow({
     id: entryId,
     start,
@@ -1045,18 +1311,21 @@ export async function updateAttendanceEntry(
     breakMinutes: breaks,
     note: input.note,
     source: existing.entry.source || "manual",
-    breaks: end ? [] : existing.entry.breaks || [],
+    breaks: keepDetailedBreaks ? existing.entry.breaks || [] : end ? [] : existing.entry.breaks || [],
+    breakAllowanceMinutes,
   });
 
   if (localStart.year === location.year && localStart.month === location.month) {
-    await updateValues(existing.spreadsheetId, `'${existing.sheetName.replace(/'/g, "''")}'!A${existing.rowNumber}:M${existing.rowNumber}`, [row]);
+    await updateValues(existing.spreadsheetId, `'${existing.sheetName.replace(/'/g, "''")}'!A${existing.rowNumber}:P${existing.rowNumber}`, [row]);
   } else {
     const targetId = await ensureYearSpreadsheet(workspaceId, localStart.year);
     const targetSheet = await resolveMonthSheet(targetId, localStart.month, true);
     if (!targetSheet) throw new Error("לא ניתן לאתר את גיליון היעד");
-    await appendValues(targetId, `'${targetSheet.replace(/'/g, "''")}'!A:M`, [row]);
+    await appendValues(targetId, `'${targetSheet.replace(/'/g, "''")}'!A:P`, [row]);
     await deleteAttendanceEntry(workspaceId, entryId, location);
   }
+  if (end) await setActiveShiftMetadata(workspaceId, null);
+  else await setActiveShiftMetadata(workspaceId, { entryId, year: localStart.year, month: localStart.month, startedAt: start.toISOString() });
   return rowToEntry(row.map(String), localStart.year, localStart.month);
 }
 
@@ -1065,7 +1334,7 @@ export async function deleteAttendanceEntry(
   entryId: string,
   location: { year: number; month: number }
 ) {
-  await assertAttendanceWorkspace(workspaceId);
+  const workspace = await assertAttendanceWorkspace(workspaceId);
   const existing = await findEntryInMonth(workspaceId, entryId, location.year, location.month, false);
   if (!existing) return;
   const metadata = await sheetsMetadata(existing.spreadsheetId);
@@ -1083,4 +1352,5 @@ export async function deleteAttendanceEntry(
       },
     },
   ]);
+  if (workspace.appProperties?.activeEntryId === entryId) await setActiveShiftMetadata(workspaceId, null);
 }

@@ -34,6 +34,7 @@ export type AttendanceFile = {
   createdTime?: string;
   modifiedTime?: string;
   webViewLink?: string;
+  breakAllowanceMinutes?: number;
 };
 
 export type DriveFolder = {

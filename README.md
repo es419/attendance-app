@@ -38,15 +38,16 @@ Clock-in, break start/end, clock-out and manual shifts can be queued while:
 Each queued action has stable IDs so replay is idempotent. On reconnect the app:
 1. reconciles Drive structure,
 2. replays pending attendance actions in order,
-3. re-reads the active month from Sheets.
+3. re-reads the active month from Sheets,
+4. restores the canonical active shift from Drive metadata.
 
 If a queued action conflicts with a workspace that was deleted or changed incompatibly in Drive, synchronization stops and the pending action remains visible instead of silently discarding it.
 
 ## Attendance
-- Quick clock-in / clock-out
+- Persistent quick clock-in / clock-out: an active shift is remembered across refreshes, app closes, device changes and reconnects until clock-out
 - Start break / return from break
 - Multiple breaks per shift
-- First 40 total break minutes are paid; only minutes above 40 are deducted
+- Configurable break allowance per attendance workspace (default 40 minutes); only break time above the configured allowance is deducted
 - Clock-out while on break closes the break automatically
 - Manual shifts with date, start/end, break total and note
 - Overnight manual shifts supported
@@ -110,3 +111,13 @@ GOOGLE_DRIVE_ROOT_FOLDER_ID=
 ```
 
 Never commit `.env.local` or OAuth client JSON files.
+
+## Persistent active shift
+Quick clock-in writes an active-shift pointer into the workspace Drive metadata and also caches it locally. The app can therefore restore an open shift even after a browser/app restart or a month boundary. Clock-out clears the pointer. If metadata is missing or stale, the app scans managed year/month sheets and repairs the pointer.
+
+## Break allowance setting
+Each attendance workspace stores `breakAllowanceMinutes` in Drive appProperties. Default is 40. The side drawer offers presets and a custom numeric value. Updating the rule recalculates closed rows in managed yearly Sheets so historical totals and the app stay consistent.
+
+### Google Sheets – human-readable break columns
+
+The annual Sheets keep technical identifiers/ISO/JSON columns hidden, while the visible view includes `סה״כ הפסקה (דק׳)`, `פירוט הפסקות`, `דקות חריגה`, `כלל הפסקה (דק׳)`, `דקות משמרת ברוטו`, and `דקות עבודה בפועל`. Existing year files are upgraded automatically when the app next opens/uses them.
