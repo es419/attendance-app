@@ -649,3 +649,566 @@ h2 { margin: 0; font-size: 18px; letter-spacing: -.02em; }
     box-shadow: none;
   }
 }
+
+/* Records polish: compact on iPhone, two useful metrics, cleaner color hierarchy */
+:root {
+  --accent: #2563eb;
+  --accent-surface: #eff6ff;
+  --accent-line: #bfdbfe;
+}
+:root[data-theme="dark"] {
+  --accent: #60a5fa;
+  --accent-surface: #102443;
+  --accent-line: #234a78;
+}
+
+.record-list {
+  gap: 7px !important;
+}
+.record-card.record-card-actions {
+  grid-template-columns: minmax(180px, 1.35fr) minmax(190px, .72fr) auto;
+  grid-template-areas:
+    "main metrics tools"
+    "breaks breaks breaks"
+    "note note note";
+  gap: 6px 12px;
+  padding: 9px 11px;
+  border-radius: 14px;
+  background: var(--surface-solid);
+  border-color: var(--line);
+}
+.record-main {
+  gap: 3px;
+}
+.record-date {
+  gap: 5px;
+  min-width: 0;
+}
+.record-date strong {
+  font-size: 14px;
+  letter-spacing: -.01em;
+}
+.record-date span {
+  color: var(--muted);
+  font-size: 9px;
+}
+.record-date em {
+  padding: 2px 5px;
+  font-size: 8px;
+  background: var(--accent-surface);
+  color: var(--accent);
+}
+.record-times {
+  gap: 5px;
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--text);
+}
+.record-times i {
+  color: var(--muted);
+  opacity: .72;
+}
+.record-metrics {
+  grid-area: metrics;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(76px, 1fr));
+  gap: 6px;
+  border: 0;
+  border-radius: 0;
+  overflow: visible;
+  background: transparent;
+}
+.record-metrics > div {
+  min-height: 40px;
+  padding: 5px 8px;
+  border: 1px solid var(--line) !important;
+  border-radius: 10px;
+  background: var(--surface-muted);
+  align-content: center;
+  gap: 1px;
+}
+.record-metrics span {
+  font-size: 8px;
+  color: var(--muted);
+  font-weight: 800;
+}
+.record-metrics strong {
+  font-size: 13px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.record-metrics .record-metric-gross {
+  background: var(--accent-surface);
+  border-color: var(--accent-line) !important;
+}
+.record-metrics .record-metric-gross strong {
+  color: var(--accent);
+}
+.record-metrics .record-metric-break.has-break {
+  background: var(--warning-surface);
+  border-color: color-mix(in srgb, var(--warning) 28%, var(--line)) !important;
+}
+.record-metrics .record-metric-break.has-break strong {
+  color: var(--warning);
+}
+.record-break-details {
+  padding: 3px 2px 0;
+  gap: 6px;
+  min-height: 18px;
+}
+.record-break-details > svg {
+  width: 14px;
+  height: 14px;
+}
+.record-break-details span,
+.record-note span {
+  font-size: 8px;
+}
+.record-break-details strong,
+.record-note strong {
+  font-size: 10px;
+}
+.record-tools {
+  grid-area: tools;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  padding: 0;
+  border: 0;
+}
+.record-tools button {
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
+  padding: 0;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  transition: transform .15s ease, background .15s ease, border-color .15s ease;
+}
+.record-tools button:active {
+  transform: scale(.94);
+}
+.record-tools button svg {
+  width: 15px;
+  height: 15px;
+}
+.record-edit-button {
+  color: var(--accent);
+  background: var(--accent-surface);
+  border-color: var(--accent-line) !important;
+}
+.record-delete-button {
+  color: var(--danger);
+  background: var(--danger-surface);
+  border-color: color-mix(in srgb, var(--danger) 22%, var(--line)) !important;
+}
+
+@media (max-width: 760px) {
+  .record-list { gap: 6px !important; }
+  .record-card.record-card-actions {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "main tools"
+      "metrics metrics"
+      "breaks breaks"
+      "note note";
+    gap: 6px 8px;
+    padding: 9px 10px;
+    border-radius: 13px;
+  }
+  .record-main { min-width: 0; }
+  .record-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 5px;
+  }
+  .record-metrics > div {
+    min-height: 36px;
+    padding: 4px 7px;
+  }
+  .record-tools {
+    align-self: start;
+  }
+}
+
+@media (max-width: 430px) {
+  .app-card {
+    padding-inline: 12px;
+  }
+  .record-card.record-card-actions {
+    padding: 8px 9px;
+    gap: 5px 7px;
+  }
+  .record-date strong { font-size: 13px; }
+  .record-date span { font-size: 8px; }
+  .record-times { font-size: 12px; }
+  .record-tools button {
+    width: 32px;
+    min-width: 32px;
+    height: 32px;
+    border-radius: 9px;
+  }
+  .record-tools button svg { width: 14px; height: 14px; }
+  .record-metrics > div {
+    min-height: 34px;
+    padding: 3px 6px;
+    border-radius: 9px;
+  }
+  .record-metrics strong { font-size: 12px; }
+  .record-break-details { padding-top: 1px; }
+}
+
+/* App-first attendance UX: hold-to-clock and collision-proof compact records */
+.hold-action {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  touch-action: manipulation;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+  flex-wrap: wrap;
+  row-gap: 2px;
+}
+.hold-action-content {
+  position: relative;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+.hold-action-hint {
+  position: relative;
+  z-index: 2;
+  width: 100%;
+  font-size: 9px;
+  line-height: 1;
+  opacity: .58;
+  font-weight: 750;
+}
+.hold-action-progress {
+  position: absolute;
+  z-index: 1;
+  inset-inline: 0;
+  bottom: 0;
+  height: 4px;
+  transform: scaleX(0);
+  transform-origin: right center;
+  background: currentColor;
+  opacity: .28;
+  transition: transform .12s ease-out;
+  pointer-events: none;
+}
+.hold-action.is-holding .hold-action-progress {
+  transform: scaleX(1);
+  transition: transform .7s linear;
+}
+.hold-action.is-holding {
+  transform: scale(.992);
+}
+
+/* Records are an app view, not a mirror of the spreadsheet schema. */
+.record-card.record-card-actions {
+  grid-template-columns: minmax(250px, 1.25fr) minmax(190px, .62fr) auto;
+}
+.record-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: center;
+  overflow: hidden;
+}
+.record-date {
+  display: grid;
+  grid-template-columns: max-content max-content max-content;
+  justify-content: start;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  white-space: nowrap;
+}
+.record-date strong,
+.record-date span,
+.record-date em {
+  position: static;
+  min-width: 0;
+  line-height: 1.15;
+}
+.record-date strong { color: var(--text); }
+.record-date span { color: var(--muted); }
+.record-date em {
+  background: color-mix(in srgb, var(--accent) 9%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--line));
+  color: var(--accent);
+}
+.record-times {
+  direction: ltr;
+  unicode-bidi: isolate;
+  justify-content: flex-end;
+  width: max-content;
+  max-width: 100%;
+  white-space: nowrap;
+  color: var(--text);
+}
+.record-times span {
+  background: transparent !important;
+  border: 0 !important;
+  padding: 0 !important;
+  border-radius: 0 !important;
+  color: inherit;
+}
+.record-metrics > div {
+  background: color-mix(in srgb, var(--surface-muted) 88%, transparent);
+}
+.record-metrics .record-metric-gross {
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+  border-color: color-mix(in srgb, var(--accent) 20%, var(--line)) !important;
+}
+.record-metrics .record-metric-gross strong { color: var(--accent); }
+.record-metrics .record-metric-break:not(.has-break) strong { color: var(--muted); }
+
+@media (max-width: 760px) {
+  .record-card.record-card-actions {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .record-date {
+    grid-template-columns: max-content max-content 1fr;
+  }
+  .record-date em { justify-self: end; }
+  .record-times { justify-content: flex-start; }
+}
+
+@media (max-width: 430px) {
+  .quick-actions { gap: 8px; }
+  .hold-action { min-height: 58px; border-radius: 17px; font-size: 16px; }
+  .hold-action-content { gap: 8px; }
+  .hold-action-hint { font-size: 8px; }
+
+  .record-card.record-card-actions {
+    padding: 8px 9px;
+    gap: 5px 7px;
+  }
+  .record-main { gap: 4px; }
+  .record-date {
+    grid-template-columns: max-content minmax(0, 1fr) max-content;
+    gap: 5px;
+  }
+  .record-date strong { font-size: 13px; }
+  .record-date span {
+    font-size: 8px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .record-date em {
+    font-size: 7px;
+    padding: 2px 4px;
+  }
+  .record-times {
+    font-size: 12px;
+    gap: 4px;
+    font-variant-numeric: tabular-nums;
+  }
+  .record-metrics {
+    gap: 4px;
+  }
+  .record-metrics > div {
+    min-height: 32px;
+    padding: 3px 6px;
+  }
+  .record-metrics span { font-size: 7px; }
+  .record-metrics strong { font-size: 12px; }
+}
+
+/* Lightweight frontend records + branded loading feedback */
+.record-card.record-card-actions {
+  grid-template-columns: max-content minmax(300px, 1fr) auto;
+  grid-template-areas: "date summary tools";
+  align-items: center;
+  gap: 10px 16px;
+  min-height: 66px;
+  padding: 9px 12px;
+  border-radius: 15px;
+}
+.record-card .record-date {
+  grid-area: date;
+  display: grid;
+  gap: 2px;
+  min-width: 96px;
+  white-space: nowrap;
+}
+.record-card .record-date strong {
+  font-size: 13px;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.record-card .record-date span {
+  font-size: 9px;
+  line-height: 1.1;
+  color: var(--muted);
+}
+.record-summary {
+  grid-area: summary;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--surface-muted) 86%, transparent);
+}
+.record-summary > div {
+  min-width: 0;
+  padding: 6px 10px;
+  display: grid;
+  gap: 2px;
+  border-inline-start: 1px solid var(--line);
+}
+.record-summary > div:first-child { border-inline-start: 0; }
+.record-summary span {
+  color: var(--muted);
+  font-size: 8px;
+  font-weight: 750;
+  line-height: 1;
+}
+.record-summary strong {
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.2;
+  direction: ltr;
+  unicode-bidi: isolate;
+  font-variant-numeric: tabular-nums;
+}
+.record-summary .record-summary-total {
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+}
+.record-summary .record-summary-total span,
+.record-summary .record-summary-total strong { color: var(--accent); }
+.record-card .record-tools {
+  grid-area: tools;
+  display: flex;
+  gap: 5px;
+  align-items: center;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.record-card .record-tools button {
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  padding: 0;
+}
+.record-card .record-tools button svg { width: 15px; height: 15px; }
+.record-card .record-edit-button {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+  border-color: color-mix(in srgb, var(--accent) 18%, var(--line)) !important;
+}
+
+.app-loading-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 4000;
+  display: grid;
+  place-items: center;
+  padding: env(safe-area-inset-top) 18px env(safe-area-inset-bottom);
+  background: color-mix(in srgb, var(--bg) 94%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  animation: loaderFadeIn .14s ease-out both;
+}
+.app-loading-overlay.page {
+  background: color-mix(in srgb, var(--bg) 78%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.brand-loader {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: .01em;
+}
+.brand-loader-icon {
+  position: relative;
+  width: 82px;
+  height: 82px;
+  border-radius: 24px;
+  padding: 4px;
+  background: var(--surface-solid);
+  box-shadow: 0 18px 45px rgba(15, 23, 42, .15);
+  animation: loaderFloat 1.15s ease-in-out infinite;
+}
+.brand-loader-icon::after {
+  content: "";
+  position: absolute;
+  inset: -7px;
+  border: 2px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 30px;
+  animation: loaderSpin 1.05s linear infinite;
+}
+.brand-loader-icon img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+  border-radius: 20px;
+}
+@keyframes loaderSpin { to { transform: rotate(360deg); } }
+@keyframes loaderFloat { 0%,100% { transform: translateY(0) scale(1); } 50% { transform: translateY(-4px) scale(1.025); } }
+@keyframes loaderFadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+@media (max-width: 760px) {
+  .record-list { gap: 6px !important; }
+  .record-card.record-card-actions {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "date tools"
+      "summary summary";
+    min-height: 0;
+    gap: 6px 8px;
+    padding: 8px 9px;
+    border-radius: 13px;
+  }
+  .record-card .record-date {
+    min-width: 0;
+    grid-template-columns: max-content max-content;
+    align-items: baseline;
+    gap: 6px;
+  }
+  .record-card .record-date strong { font-size: 12px; }
+  .record-card .record-date span { font-size: 8px; }
+  .record-summary { border-radius: 10px; }
+  .record-summary > div { padding: 5px 7px; }
+  .record-summary span { font-size: 7px; }
+  .record-summary strong { font-size: 13px; }
+  .record-card .record-tools { justify-self: end; }
+  .record-card .record-tools button {
+    width: 30px;
+    min-width: 30px;
+    height: 30px;
+    border-radius: 9px;
+  }
+  .record-card .record-tools button svg { width: 14px; height: 14px; }
+}
+
+@media (max-width: 390px) {
+  .record-card.record-card-actions { padding: 7px 8px; gap: 5px 6px; }
+  .record-summary > div { padding-inline: 5px; }
+  .record-summary strong { font-size: 12px; }
+  .record-card .record-tools button { width: 28px; min-width: 28px; height: 28px; }
+  .brand-loader-icon { width: 74px; height: 74px; border-radius: 22px; }
+  .brand-loader-icon img { border-radius: 18px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .brand-loader-icon,
+  .brand-loader-icon::after { animation-duration: 1.8s; }
+}

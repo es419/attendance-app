@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import type {
   AttendanceBreak,
   AttendanceEntry,
@@ -37,6 +38,13 @@ const QUEUE_KEY = "attendance:offlineQueue:v1";
 const FILES_CACHE_KEY = "attendance:filesCache:v1";
 const ENTRY_CACHE_PREFIX = "attendance:entriesCache:v1:";
 const ACTIVE_CACHE_PREFIX = "attendance:activeShift:v1:";
+const FILES_FRESH_MS = 120_000;
+const ENTRIES_FRESH_MS = 45_000;
+const ACTIVE_FRESH_MS = 45_000;
+
+function entryCacheKey(workspaceId: string, year: number, month: number) {
+  return `${ENTRY_CACHE_PREFIX}${workspaceId}:${year}:${month}`;
+}
 
 function formatDuration(minutes: number) {
   const safe = Number.isFinite(minutes) ? Math.max(0, Math.floor(minutes)) : 0;
@@ -132,6 +140,81 @@ function Icon({ name }: { name: "home" | "records" | "files" | "more" | "plus" |
   return <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
 }
 
+
+function HoldActionButton({
+  className,
+  disabled,
+  onComplete,
+  children,
+  holdMs = 700,
+  ariaLabel,
+}: {
+  className: string;
+  disabled?: boolean;
+  onComplete: () => void | Promise<void>;
+  children: ReactNode;
+  holdMs?: number;
+  ariaLabel: string;
+}) {
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [holding, setHolding] = useState(false);
+  const completedRef = useRef(false);
+
+  const clearHold = useCallback(() => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = null;
+    if (!completedRef.current) setHolding(false);
+    completedRef.current = false;
+  }, []);
+
+  const startHold = useCallback(() => {
+    if (disabled || timerRef.current) return;
+    completedRef.current = false;
+    setHolding(true);
+    timerRef.current = setTimeout(() => {
+      timerRef.current = null;
+      completedRef.current = true;
+      setHolding(false);
+      if (typeof navigator !== "undefined" && "vibrate" in navigator) navigator.vibrate?.(24);
+      void onComplete();
+    }, holdMs);
+  }, [disabled, holdMs, onComplete]);
+
+  useEffect(() => () => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+  }, []);
+
+  return (
+    <button
+      type="button"
+      className={`${className} hold-action${holding ? " is-holding" : ""}`}
+      disabled={disabled}
+      aria-label={ariaLabel}
+      onPointerDown={(event) => { event.currentTarget.setPointerCapture?.(event.pointerId); startHold(); }}
+      onPointerUp={clearHold}
+      onPointerCancel={clearHold}
+      onLostPointerCapture={clearHold}
+      onKeyDown={(event) => {
+        if ((event.key === "Enter" || event.key === " ") && !event.repeat) {
+          event.preventDefault();
+          startHold();
+        }
+      }}
+      onKeyUp={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          clearHold();
+        }
+      }}
+      onContextMenu={(event) => event.preventDefault()}
+    >
+      <span className="hold-action-content">{children}</span>
+      <span className="hold-action-hint">החזק לשמירה</span>
+      <span className="hold-action-progress" aria-hidden="true" />
+    </button>
+  );
+}
+
 class ApiRequestError extends Error {
   network: boolean;
   constructor(message: string, network = false) {
@@ -140,16 +223,36 @@ class ApiRequestError extends Error {
   }
 }
 
+const inFlightGets = new Map<string, Promise<unknown>>();
+
 async function api<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
-  let response: Response;
-  try {
-    response = await fetch(input, { ...init, cache: "no-store" });
-  } catch {
-    throw new ApiRequestError("אין כרגע חיבור לרשת", true);
+  const method = (init?.method || "GET").toUpperCase();
+  const requestKey = method === "GET" ? String(input) : null;
+  if (requestKey) {
+    const existing = inFlightGets.get(requestKey);
+    if (existing) return existing as Promise<T>;
   }
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new ApiRequestError(data.error || "משהו השתבש", false);
-  return data as T;
+
+  const request = (async () => {
+    let response: Response;
+    try {
+      response = await fetch(input, { ...init, cache: "no-store" });
+    } catch {
+      throw new ApiRequestError("אין כרגע חיבור לרשת", true);
+    }
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new ApiRequestError(data.error || "משהו השתבש", false);
+    return data as T;
+  })();
+
+  if (requestKey) {
+    inFlightGets.set(requestKey, request);
+    void request.then(
+      () => inFlightGets.delete(requestKey),
+      () => inFlightGets.delete(requestKey),
+    );
+  }
+  return request;
 }
 
 function eventEndpoint(event: OfflineAttendanceEvent) {
@@ -269,6 +372,12 @@ export default function Page() {
   const [message, setMessage] = useState<string | null>(null);
   const [online, setOnline] = useState(true);
   const [queue, setQueue] = useState<OfflineAttendanceEvent[]>([]);
+  const [bootLoading, setBootLoading] = useState(true);
+  const [pageLoading, setPageLoading] = useState(false);
+  const filesFetchedAtRef = useRef(0);
+  const entriesFetchedAtRef = useRef(new Map<string, number>());
+  const activeFetchedAtRef = useRef(new Map<string, number>());
+  const didRenderTabRef = useRef(false);
 
   const [createOpen, setCreateOpen] = useState(false);
   const [createName, setCreateName] = useState("");
@@ -316,7 +425,7 @@ export default function Page() {
   }, []);
 
   useEffect(() => {
-    const id = window.setInterval(() => setNow(new Date()), 1000);
+    const id = window.setInterval(() => setNow(new Date()), 15000);
     return () => clearInterval(id);
   }, []);
 
@@ -366,11 +475,14 @@ export default function Page() {
     }
   }, []);
 
-  const loadFiles = useCallback(async () => {
+  const loadFiles = useCallback(async (force = false) => {
     if (!navigator.onLine) return;
+    const nowMs = Date.now();
+    if (!force && nowMs - filesFetchedAtRef.current < FILES_FRESH_MS) return;
     setLoadingFiles(true);
     try {
       const data = await api<{ files: AttendanceFile[] }>("/api/drive/files");
+      filesFetchedAtRef.current = Date.now();
       setFiles(data.files);
       window.localStorage.setItem(FILES_CACHE_KEY, JSON.stringify(data.files));
       setSelectedFileId((current) => {
@@ -379,49 +491,50 @@ export default function Page() {
         if (candidate && data.files.some((file) => file.id === candidate)) return candidate;
         return data.files[0]?.id || null;
       });
-      await loadFolders();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "לא ניתן לסנכרן את Drive");
     } finally {
       setLoadingFiles(false);
     }
-  }, [loadFolders]);
+  }, []);
 
-  const cacheKey = useCallback((workspaceId: string, year = viewYear, month = viewMonth) => {
-    return `${ENTRY_CACHE_PREFIX}${workspaceId}:${year}:${month}`;
-  }, [viewMonth, viewYear]);
+  const loadEntries = useCallback(async (workspaceId: string, year: number, month: number, force = false) => {
+    const key = entryCacheKey(workspaceId, year, month);
+    const cached = readJson<AttendanceEntry[]>(key, []);
+    setEntries(cached);
+    if (!navigator.onLine || !status?.connected) return;
 
-  const loadEntries = useCallback(async (workspaceId: string, year = viewYear, month = viewMonth) => {
-    const key = cacheKey(workspaceId, year, month);
-    if (!navigator.onLine || !status?.connected) {
-      setEntries(readJson<AttendanceEntry[]>(key, []));
-      return;
-    }
+    const fetchedAt = entriesFetchedAtRef.current.get(key) || 0;
+    if (!force && Date.now() - fetchedAt < ENTRIES_FRESH_MS) return;
+
     setLoadingEntries(true);
     try {
       const data = await api<{ entries: AttendanceEntry[] }>(`/api/attendance?workspaceId=${encodeURIComponent(workspaceId)}&year=${year}&month=${month}`);
+      entriesFetchedAtRef.current.set(key, Date.now());
       setEntries(data.entries);
       window.localStorage.setItem(key, JSON.stringify(data.entries));
     } catch (error) {
-      const cached = readJson<AttendanceEntry[]>(key, []);
       if (cached.length) setEntries(cached);
       setMessage(error instanceof Error ? error.message : "לא ניתן לקרוא רשומות");
     } finally {
       setLoadingEntries(false);
     }
-  }, [cacheKey, status?.connected, viewMonth, viewYear]);
+  }, [status?.connected]);
 
   const activeCacheKey = useCallback((workspaceId: string) => `${ACTIVE_CACHE_PREFIX}${workspaceId}`, []);
 
-  const loadActiveShift = useCallback(async (workspaceId: string) => {
+  const loadActiveShift = useCallback(async (workspaceId: string, force = false) => {
     const key = activeCacheKey(workspaceId);
     const cached = readJson<AttendanceEntry | null>(key, null);
-    if (!navigator.onLine || !status?.connected) {
-      setActiveShift(cached);
-      return cached;
-    }
+    setActiveShift(cached);
+    if (!navigator.onLine || !status?.connected) return cached;
+
+    const fetchedAt = activeFetchedAtRef.current.get(workspaceId) || 0;
+    if (!force && Date.now() - fetchedAt < ACTIVE_FRESH_MS) return cached;
+
     try {
       const data = await api<{ entry: AttendanceEntry | null }>(`/api/attendance/active?workspaceId=${encodeURIComponent(workspaceId)}`);
+      activeFetchedAtRef.current.set(workspaceId, Date.now());
       setActiveShift(data.entry);
       if (data.entry) window.localStorage.setItem(key, JSON.stringify(data.entry));
       else window.localStorage.removeItem(key);
@@ -458,8 +571,8 @@ export default function Page() {
         saveQueue(remaining);
       }
       if (selectedFileId) {
-        await loadEntries(selectedFileId);
-        await loadActiveShift(selectedFileId);
+        await loadEntries(selectedFileId, viewYear, viewMonth, true);
+        await loadActiveShift(selectedFileId, true);
       }
       setMessage(`${synced} פעולות Offline סונכרנו ל-Google Drive`);
     } catch (error) {
@@ -468,14 +581,30 @@ export default function Page() {
     } finally {
       setPendingAction(null);
     }
-  }, [loadActiveShift, loadEntries, pendingAction, saveQueue, selectedFileId, status?.connected]);
+  }, [loadActiveShift, loadEntries, pendingAction, saveQueue, selectedFileId, status?.connected, viewMonth, viewYear]);
 
   useEffect(() => {
+    let cancelled = false;
+    const startedAt = Date.now();
     void (async () => {
       const currentStatus = await loadStatus();
-      if (currentStatus.connected && navigator.onLine) await loadFiles();
+      const finishBoot = () => { if (!cancelled) setBootLoading(false); };
+      const remaining = Math.max(0, 420 - (Date.now() - startedAt));
+      window.setTimeout(finishBoot, remaining);
+      if (currentStatus.connected && navigator.onLine) void loadFiles(true);
     })();
+    return () => { cancelled = true; };
   }, [loadFiles, loadStatus]);
+
+  useEffect(() => {
+    if (!didRenderTabRef.current) {
+      didRenderTabRef.current = true;
+      return;
+    }
+    setPageLoading(true);
+    const id = window.setTimeout(() => setPageLoading(false), 260);
+    return () => window.clearTimeout(id);
+  }, [tab]);
 
   useEffect(() => {
     if (!selectedFileId) {
@@ -484,10 +613,20 @@ export default function Page() {
       return;
     }
     window.localStorage.setItem("attendance:selectedWorkspace", selectedFileId);
-    setActiveShift(readJson<AttendanceEntry | null>(`${ACTIVE_CACHE_PREFIX}${selectedFileId}`, null));
-    void loadEntries(selectedFileId);
     void loadActiveShift(selectedFileId);
-  }, [selectedFileId, loadActiveShift, loadEntries]);
+  }, [selectedFileId, loadActiveShift]);
+
+  useEffect(() => {
+    if (!selectedFileId) {
+      setEntries([]);
+      return;
+    }
+    void loadEntries(selectedFileId, viewYear, viewMonth);
+  }, [selectedFileId, viewYear, viewMonth, loadEntries]);
+
+  useEffect(() => {
+    if (folderManagerOpen && status?.connected && online) void loadFolders();
+  }, [folderManagerOpen, loadFolders, online, status?.connected]);
 
   useEffect(() => {
     if (online && status?.connected) void flushQueue();
@@ -513,13 +652,13 @@ export default function Page() {
       lastForegroundSync = now;
       void loadFiles();
       if (selectedFileId) {
-        void loadEntries(selectedFileId);
+        void loadEntries(selectedFileId, viewYear, viewMonth);
         void loadActiveShift(selectedFileId);
       }
       void flushQueue();
     };
 
-    const interval = window.setInterval(backgroundSync, 60000);
+    const interval = window.setInterval(backgroundSync, 180000);
     const onVisible = () => document.visibilityState === "visible" && foregroundSync();
     window.addEventListener("focus", foregroundSync);
     document.addEventListener("visibilitychange", onVisible);
@@ -528,7 +667,7 @@ export default function Page() {
       window.removeEventListener("focus", foregroundSync);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [status?.connected, online, selectedFileId, loadActiveShift, loadEntries, loadFiles, flushQueue]);
+  }, [status?.connected, online, selectedFileId, viewYear, viewMonth, loadActiveShift, loadEntries, loadFiles, flushQueue]);
 
   useEffect(() => {
     if (tab !== "home") return;
@@ -563,28 +702,37 @@ export default function Page() {
   }, [activeEntry, now]);
   const liveBreak = activeEntry ? liveBreakMinutes(activeEntry.breaks || [], now) : 0;
   const liveCredited = activeEntry ? creditedMinutes(liveGross, liveBreak, breakAllowanceMinutes) : 0;
-  const monthMinutes = entries.reduce((sum, entry) => sum + (entry.clockOut ? entry.durationMinutes : entry.id === activeEntry?.id ? liveCredited : 0), 0);
+  const monthMinutes = useMemo(
+    () => entries.reduce((sum, entry) => sum + (entry.clockOut ? entry.durationMinutes : entry.id === activeEntry?.id ? liveCredited : 0), 0),
+    [activeEntry?.id, entries, liveCredited],
+  );
   const remaining = Math.max(0, TARGET_MINUTES - monthMinutes);
   const progress = Math.min(100, (monthMinutes / TARGET_MINUTES) * 100);
 
   const refreshCurrent = useCallback(async () => {
     if (!selectedFileId) return;
-    await Promise.all([loadEntries(selectedFileId), loadActiveShift(selectedFileId)]);
-  }, [loadActiveShift, loadEntries, selectedFileId]);
+    await Promise.all([
+      loadEntries(selectedFileId, viewYear, viewMonth, true),
+      loadActiveShift(selectedFileId, true),
+    ]);
+  }, [loadActiveShift, loadEntries, selectedFileId, viewMonth, viewYear]);
 
   const syncNow = useCallback(async () => {
     if (!status?.connected || !navigator.onLine) return;
-    await loadFiles();
-    if (selectedFileId) await Promise.all([loadEntries(selectedFileId), loadActiveShift(selectedFileId)]);
+    await loadFiles(true);
+    if (selectedFileId) await Promise.all([
+      loadEntries(selectedFileId, viewYear, viewMonth, true),
+      loadActiveShift(selectedFileId, true),
+    ]);
     await flushQueue();
-  }, [flushQueue, loadActiveShift, loadEntries, loadFiles, selectedFileId, status?.connected]);
+  }, [flushQueue, loadActiveShift, loadEntries, loadFiles, selectedFileId, status?.connected, viewMonth, viewYear]);
 
   function enqueueAndApply(event: OfflineAttendanceEvent) {
     const current = readJson<OfflineAttendanceEvent[]>(QUEUE_KEY, []);
     if (!current.some((item) => item.id === event.id)) saveQueue([...current, event]);
     setEntries((before) => {
       const updated = optimisticEvent(before, event, breakAllowanceMinutes);
-      if (selectedFileId) window.localStorage.setItem(cacheKey(selectedFileId, viewYear, viewMonth), JSON.stringify(updated));
+      if (selectedFileId) window.localStorage.setItem(entryCacheKey(selectedFileId, viewYear, viewMonth), JSON.stringify(updated));
       return updated;
     });
     if (event.type !== "manual") {
@@ -627,7 +775,7 @@ export default function Page() {
       const confirmed = data.entry;
       const entryYear = confirmed.year || event.year || viewYear;
       const entryMonth = confirmed.month || event.month || viewMonth;
-      const key = cacheKey(event.workspaceId, entryYear, entryMonth);
+      const key = entryCacheKey(event.workspaceId, entryYear, entryMonth);
       const cached = readJson<AttendanceEntry[]>(key, []);
       const without = cached.filter((item) => item.id !== confirmed.id);
       const updated = [confirmed, ...without];
@@ -662,13 +810,13 @@ export default function Page() {
         id: crypto.randomUUID(), type: "clock-in", workspaceId: selectedFileId,
         entryId: crypto.randomUUID(), atIso: at.toISOString(), year: local.year, month: local.month,
       };
-      await sendOrQueue(event, "in", "הכניסה נשמרה ב-Google Sheets");
+      await sendOrQueue(event, "in", "הכניסה נשמרה");
     } else if (activeEntry) {
       const event: OfflineAttendanceEvent = {
         id: crypto.randomUUID(), type: "clock-out", workspaceId: selectedFileId,
         entryId: activeEntry.id, atIso: at.toISOString(), year: activeEntry.year || local.year, month: activeEntry.month || local.month,
       };
-      await sendOrQueue(event, "out", "היציאה נשמרה ב-Google Sheets");
+      await sendOrQueue(event, "out", "היציאה נשמרה");
     }
   }
 
@@ -703,7 +851,7 @@ export default function Page() {
       setManualStart(""); setManualEnd(""); setManualBreakMinutes("0"); setManualNote("");
       await refreshCurrent();
       setTab("records");
-      setMessage("המשמרת הידנית נוספה ל-Google Sheets");
+      setMessage("המשמרת הידנית נוספה לרשומות");
     } catch (error) {
       if (error instanceof ApiRequestError && error.network) {
         enqueueAndApply(event); setManualOpen(false); setTab("records");
@@ -723,7 +871,7 @@ export default function Page() {
         body: JSON.stringify({ name, folderName, subfolderName: subfolderName || undefined }),
       });
       setCreateOpen(false); setCreateName(""); setCreateFolderName(""); setCreateSubfolderName("");
-      await loadFiles(); setSelectedFileId(data.file.id); setTab("home");
+      await loadFiles(true); setSelectedFileId(data.file.id); setTab("home");
       setMessage("התיקייה וקובץ הנוכחות נוצרו ב-Google Drive");
     } catch (error) { setMessage(error instanceof Error ? error.message : "לא ניתן ליצור קובץ"); }
     finally { setPendingAction(null); }
@@ -736,7 +884,7 @@ export default function Page() {
     setPendingAction("rename");
     try {
       await api(`/api/drive/files/${encodeURIComponent(file.id)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
-      setMenuFile(null); await loadFiles(); setMessage("השם עודכן גם ב-Google Drive");
+      setMenuFile(null); await loadFiles(true); setMessage("השם עודכן גם ב-Google Drive");
     } catch (error) { setMessage(error instanceof Error ? error.message : "לא ניתן לשנות שם"); }
     finally { setPendingAction(null); }
   }
@@ -752,7 +900,7 @@ export default function Page() {
       await api(`/api/drive/files/${encodeURIComponent(pathFile.id)}`, {
         method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ folderPath: parsePath(pathValue) }),
       });
-      setPathFile(null); await loadFiles(); setMessage("הנתיב עודכן ב-Google Drive");
+      setPathFile(null); await loadFiles(true); setMessage("הנתיב עודכן ב-Google Drive");
     } catch (error) { setMessage(error instanceof Error ? error.message : "לא ניתן להעביר את הקובץ"); }
     finally { setPendingAction(null); }
   }
@@ -763,7 +911,7 @@ export default function Page() {
     setPendingAction("delete");
     try {
       await api(`/api/drive/files/${encodeURIComponent(file.id)}`, { method: "DELETE" });
-      setMenuFile(null); window.localStorage.removeItem(activeCacheKey(file.id)); if (selectedFileId === file.id) setSelectedFileId(null); await loadFiles();
+      setMenuFile(null); window.localStorage.removeItem(activeCacheKey(file.id)); if (selectedFileId === file.id) setSelectedFileId(null); await loadFiles(true);
       setMessage("קובץ הנוכחות הועבר לאשפה ב-Google Drive");
     } catch (error) { setMessage(error instanceof Error ? error.message : "לא ניתן למחוק"); }
     finally { setPendingAction(null); }
@@ -790,7 +938,7 @@ export default function Page() {
           breakMinutes: Number(editBreakMinutes || 0), note: editNote,
         }),
       });
-      setEditingEntry(null); await refreshCurrent(); setMessage("הרשומה עודכנה ב-Google Sheets");
+      setEditingEntry(null); await refreshCurrent(); setMessage("הרשומה עודכנה וסונכרנה");
     } catch (error) { setMessage(error instanceof Error ? error.message : "לא ניתן לערוך רשומה"); }
     finally { setPendingAction(null); }
   }
@@ -802,7 +950,7 @@ export default function Page() {
     try {
       const params = new URLSearchParams({ workspaceId: selectedFileId, year: String(entry.year || israelParts().year), month: String(entry.month || israelParts().month) });
       await api(`/api/attendance/${encodeURIComponent(entry.id)}?${params.toString()}`, { method: "DELETE" });
-      await refreshCurrent(); setMessage("הרשומה נמחקה מ-Google Sheets");
+      await refreshCurrent(); setMessage("הרשומה נמחקה וסונכרנה");
     } catch (error) { setMessage(error instanceof Error ? error.message : "לא ניתן למחוק רשומה"); }
     finally { setPendingAction(null); }
   }
@@ -824,7 +972,7 @@ export default function Page() {
     setPendingAction("folder");
     try {
       await api("/api/drive/folders", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: folder.id, name }) });
-      await loadFiles(); await loadFolders(); setMessage("שם התיקייה עודכן ב-Google Drive");
+      await loadFiles(true); await loadFolders(); setMessage("שם התיקייה עודכן ב-Google Drive");
     } catch (error) { setMessage(error instanceof Error ? error.message : "לא ניתן לשנות שם תיקייה"); }
     finally { setPendingAction(null); }
   }
@@ -836,7 +984,7 @@ export default function Page() {
     setPendingAction("folder");
     try {
       await api(`/api/drive/folders?id=${encodeURIComponent(folder.id)}`, { method: "DELETE" });
-      await loadFiles(); await loadFolders(); setMessage("התיקייה הועברה לאשפה ב-Google Drive");
+      await loadFiles(true); await loadFolders(); setMessage("התיקייה הועברה לאשפה ב-Google Drive");
     } catch (error) { setMessage(error instanceof Error ? error.message : "לא ניתן למחוק תיקייה"); }
     finally { setPendingAction(null); }
   }
@@ -852,7 +1000,7 @@ export default function Page() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ breakAllowanceMinutes: minutes }),
       });
-      await loadFiles();
+      await loadFiles(true);
       await refreshCurrent();
       setBreakAllowanceInput(String(minutes));
       setMessage(`כלל ההפסקה עודכן ל-${minutes} דקות. הרשומות הקיימות חושבו מחדש.`);
@@ -890,6 +1038,14 @@ export default function Page() {
 
   return (
     <main className="app-shell">
+      {(bootLoading || pageLoading) && (
+        <div className={`app-loading-overlay ${bootLoading ? "boot" : "page"}`} role="status" aria-live="polite">
+          <div className="brand-loader">
+            <div className="brand-loader-icon"><img src="/icon-192.png" alt="" /></div>
+            <span>{bootLoading ? "פותח את יומן הנוכחות…" : "טוען…"}</span>
+          </div>
+        </div>
+      )}
       <section className="app-card">
         <header className="topbar">
           <div>
@@ -934,11 +1090,11 @@ export default function Page() {
               <>
                 <div className="action-stack quick-actions">
                   {!activeEntry ? (
-                    <button className="primary-action" disabled={Boolean(pendingAction)} onClick={() => void quickAction("in")}><span className="action-dot in"/>כניסה מהירה</button>
+                    <HoldActionButton className="primary-action" disabled={Boolean(pendingAction)} onComplete={() => quickAction("in")} ariaLabel="לחיצה ארוכה לכניסה מהירה"><span className="action-dot in"/>כניסה מהירה</HoldActionButton>
                   ) : (
                     <>
                       <button className="secondary-action break-action" disabled={Boolean(pendingAction)} onClick={() => void breakAction(activeBreak ? "end" : "start")}><Icon name="coffee" />{activeBreak ? "חזרה מהפסקה" : "יציאה להפסקה"}</button>
-                      <button className="danger-action" disabled={Boolean(pendingAction)} onClick={() => void quickAction("out")}><span className="action-dot out"/>יציאה מהירה</button>
+                      <HoldActionButton className="danger-action" disabled={Boolean(pendingAction)} onComplete={() => quickAction("out")} ariaLabel="לחיצה ארוכה ליציאה מהירה"><span className="action-dot out"/>יציאה מהירה</HoldActionButton>
                     </>
                   )}
                   <button className="secondary-action manual-button" onClick={() => setManualOpen(true)}><Icon name="clock" />הוספת משמרת ידנית</button>
@@ -972,7 +1128,7 @@ export default function Page() {
 
         {tab === "records" && (
           <div className="screen-content">
-            <div className="section-heading records-heading"><div><p className="eyebrow">Google Sheets</p><h2>{MONTHS_HE[viewMonth - 1]} {viewYear}</h2></div><div className="heading-actions"><span className="live-label">{loadingEntries ? "מסנכרן…" : online && connected ? "מסונכרן" : "מטמון"}</span><button className="small-button" disabled={!selectedFile} onClick={() => setManualOpen(true)}><Icon name="plus"/>משמרת</button></div></div>
+            <div className="section-heading records-heading"><div><p className="eyebrow">יומן נוכחות</p><h2>{MONTHS_HE[viewMonth - 1]} {viewYear}</h2></div><div className="heading-actions"><span className="live-label">{loadingEntries ? "מסנכרן…" : online && connected ? "מסונכרן" : "מטמון"}</span><button className="small-button" disabled={!selectedFile} onClick={() => setManualOpen(true)}><Icon name="plus"/>משמרת</button></div></div>
             <div className="period-controls">
               <select className="period-picker" value={viewMonth} onChange={(e) => setViewMonth(Number(e.target.value))} aria-label="בחר חודש">
                 {MONTHS_HE.map((month, index) => <option key={month} value={index + 1}>{month}</option>)}
@@ -986,29 +1142,24 @@ export default function Page() {
             <div className="record-list">
               {entries.map((entry) => {
                 const live = !entry.clockOut && entry.clockInIso;
-                const gross = live ? Math.max(0, Math.floor((now.getTime() - Date.parse(entry.clockInIso!)) / 60000)) : entry.grossDurationMinutes || entry.durationMinutes;
-                const breaks = live ? liveBreakMinutes(entry.breaks || [], now) : entry.breakMinutes || 0;
-                const total = live ? creditedMinutes(gross, breaks, breakAllowanceMinutes) : entry.durationMinutes;
+                const total = live
+                  ? creditedMinutes(
+                      Math.max(0, Math.floor((now.getTime() - Date.parse(entry.clockInIso!)) / 60000)),
+                      liveBreakMinutes(entry.breaks || [], now),
+                      breakAllowanceMinutes,
+                    )
+                  : entry.durationMinutes;
                 return (
                   <article className="record-card record-card-actions" key={entry.id}>
-                    <div className="record-main">
-                      <div className="record-date"><strong>{entry.date}</strong><span>{entry.weekday}</span><em>{entry.source === "manual" ? "ידני" : "מהיר"}</em></div>
-                      <div className="record-times" aria-label="שעות המשמרת"><span>{entry.clockIn}</span><i>→</i><span>{entry.clockOut || "פעיל"}</span></div>
+                    <div className="record-date"><strong>{entry.date}</strong><span>{entry.weekday}</span></div>
+                    <div className="record-summary" aria-label="פרטי המשמרת">
+                      <div><span>כניסה</span><strong>{entry.clockIn}</strong></div>
+                      <div><span>יציאה</span><strong>{entry.clockOut || "פעיל"}</strong></div>
+                      <div className="record-summary-total"><span>סה״כ</span><strong>{formatDuration(total)}</strong></div>
                     </div>
-                    <div className="record-metrics">
-                      <div><span>ברוטו</span><strong>{formatDuration(gross)}</strong></div>
-                      <div><span>הפסקה</span><strong>{formatDuration(breaks)}</strong></div>
-                      <div className={Math.max(0, breaks - breakAllowanceMinutes) > 0 ? "metric-warning" : ""}><span>חריגה</span><strong>{formatDuration(Math.max(0, breaks - breakAllowanceMinutes))}</strong></div>
-                      <div className="metric-primary"><span>לחיוב</span><strong>{formatDuration(total)}</strong></div>
-                    </div>
-                    {(breaks > 0 || Boolean(entry.breaks?.length)) && <div className="record-break-details">
-                      <Icon name="coffee" />
-                      <div><span>פירוט הפסקות · כלל {breakAllowanceMinutes} דק׳</span><strong>{entry.breaks?.length ? entry.breaks.map((item) => `${item.start}–${item.end || "פעילה"}`).join(" · ") : `${formatDuration(breaks)} (ידני)`}</strong></div>
-                    </div>}
-                    {entry.note && <div className="record-note"><span>הערה</span><strong>{entry.note}</strong></div>}
                     <div className="record-tools">
-                      <button aria-label="ערוך רשומה" title="ערוך רשומה" onClick={() => openEditEntry(entry)}><Icon name="edit"/><span>ערוך</span></button>
-                      <button aria-label="מחק רשומה" title="מחק רשומה" className="danger-icon" onClick={() => void deleteEntry(entry)}><Icon name="trash"/><span>מחק</span></button>
+                      <button className="record-edit-button" aria-label="ערוך רשומה" title="ערוך רשומה" onClick={() => openEditEntry(entry)}><Icon name="edit"/></button>
+                      <button aria-label="מחק רשומה" title="מחק רשומה" className="record-delete-button" onClick={() => void deleteEntry(entry)}><Icon name="trash"/></button>
                     </div>
                   </article>
                 );
@@ -1046,7 +1197,7 @@ export default function Page() {
 
       {createOpen && <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setCreateOpen(false)}><div className="modal-card"><div className="modal-title"><div><p className="eyebrow">Google Drive</p><h2>קובץ נוכחות חדש</h2></div><button className="icon-button compact" onClick={() => setCreateOpen(false)}><Icon name="close"/></button></div><label className="field-label">שם קובץ הנוכחות</label><input className="text-input" value={createName} onChange={(e) => setCreateName(e.target.value)} placeholder="לדוגמה: מס הכנסה" autoFocus/><label className="field-label">שם התיקייה</label><input className="text-input" value={createFolderName} onChange={(e) => setCreateFolderName(e.target.value)} placeholder="לדוגמה: עבודה"/><label className="field-label">תת־תיקייה <span className="optional-label">אופציונלי</span></label><input className="text-input" value={createSubfolderName} onChange={(e) => setCreateSubfolderName(e.target.value)} placeholder="לדוגמה: רשות המסים"/><div className="drive-preview"><span>הנתיב שייווצר</span><strong>נוכחות בעבודה / {createFolderName || "תיקייה"}{createSubfolderName ? ` / ${createSubfolderName}` : ""} / {createName || "קובץ נוכחות"}</strong></div><button className="primary-action modal-action" disabled={!createName.trim() || !createFolderName.trim() || pendingAction === "create"} onClick={() => void createFile()}>{pendingAction === "create" ? "יוצר ב-Drive…" : "צור וסנכרן"}</button></div></div>}
 
-      {manualOpen && <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setManualOpen(false)}><div className="modal-card"><div className="modal-title"><div><p className="eyebrow">משמרת ידנית</p><h2>הוספת שעות</h2></div><button className="icon-button compact" onClick={() => setManualOpen(false)}><Icon name="close"/></button></div><label className="field-label">תאריך</label><input className="text-input ltr-input" type="date" value={manualDate} onChange={(e) => setManualDate(e.target.value)}/><div className="two-fields"><div><label className="field-label">כניסה</label><input className="text-input ltr-input" type="time" value={manualStart} onChange={(e) => setManualStart(e.target.value)}/></div><div><label className="field-label">יציאה</label><input className="text-input ltr-input" type="time" value={manualEnd} onChange={(e) => setManualEnd(e.target.value)}/></div></div><label className="field-label">סה״כ דקות הפסקה</label><input className="text-input ltr-input" type="number" min="0" max="600" value={manualBreakMinutes} onChange={(e) => setManualBreakMinutes(e.target.value)}/><label className="field-label">הערה <span className="optional-label">אופציונלי</span></label><input className="text-input" value={manualNote} onChange={(e) => setManualNote(e.target.value)} placeholder="לדוגמה: עבודה מהבית"/><div className="break-policy-card"><Icon name="coffee"/><div><strong>כלל ההפסקה: {breakAllowanceMinutes} דקות</strong><span>{breakAllowanceMinutes === 0 ? "כל דקות ההפסקה ינוכו מזמן העבודה." : `רק דקות ההפסקה שמעבר ל־${breakAllowanceMinutes} דקות ינוכו מזמן העבודה.`}</span></div></div><button className="primary-action modal-action" disabled={!manualStart || !manualEnd || Boolean(pendingAction)} onClick={() => void addManual()}>{connected && online ? "הוסף ל-Google Sheets" : "שמור מקומית לסנכרון"}</button></div></div>}
+      {manualOpen && <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setManualOpen(false)}><div className="modal-card"><div className="modal-title"><div><p className="eyebrow">משמרת ידנית</p><h2>הוספת שעות</h2></div><button className="icon-button compact" onClick={() => setManualOpen(false)}><Icon name="close"/></button></div><label className="field-label">תאריך</label><input className="text-input ltr-input" type="date" value={manualDate} onChange={(e) => setManualDate(e.target.value)}/><div className="two-fields"><div><label className="field-label">כניסה</label><input className="text-input ltr-input" type="time" value={manualStart} onChange={(e) => setManualStart(e.target.value)}/></div><div><label className="field-label">יציאה</label><input className="text-input ltr-input" type="time" value={manualEnd} onChange={(e) => setManualEnd(e.target.value)}/></div></div><label className="field-label">סה״כ דקות הפסקה</label><input className="text-input ltr-input" type="number" min="0" max="600" value={manualBreakMinutes} onChange={(e) => setManualBreakMinutes(e.target.value)}/><label className="field-label">הערה <span className="optional-label">אופציונלי</span></label><input className="text-input" value={manualNote} onChange={(e) => setManualNote(e.target.value)} placeholder="לדוגמה: עבודה מהבית"/><div className="break-policy-card"><Icon name="coffee"/><div><strong>כלל ההפסקה: {breakAllowanceMinutes} דקות</strong><span>{breakAllowanceMinutes === 0 ? "כל דקות ההפסקה ינוכו מזמן העבודה." : `רק דקות ההפסקה שמעבר ל־${breakAllowanceMinutes} דקות ינוכו מזמן העבודה.`}</span></div></div><button className="primary-action modal-action" disabled={!manualStart || !manualEnd || Boolean(pendingAction)} onClick={() => void addManual()}>{connected && online ? "שמור משמרת" : "שמור מקומית לסנכרון"}</button></div></div>}
 
       {editingEntry && <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setEditingEntry(null)}><div className="modal-card"><div className="modal-title"><div><p className="eyebrow">עריכת רשומה</p><h2>{editingEntry.date}</h2></div><button className="icon-button compact" onClick={() => setEditingEntry(null)}><Icon name="close"/></button></div><label className="field-label">תאריך</label><input className="text-input ltr-input" type="date" value={editDate} onChange={(e) => setEditDate(e.target.value)}/><div className="two-fields"><div><label className="field-label">כניסה</label><input className="text-input ltr-input" type="time" value={editStart} onChange={(e) => setEditStart(e.target.value)}/></div><div><label className="field-label">יציאה {editingEntry.clockOut ? "" : "(אופציונלי)"}</label><input className="text-input ltr-input" type="time" value={editEnd} onChange={(e) => setEditEnd(e.target.value)}/></div></div><label className="field-label">דקות הפסקה</label><input className="text-input ltr-input" type="number" min="0" value={editBreakMinutes} onChange={(e) => setEditBreakMinutes(e.target.value)}/><label className="field-label">הערה</label><input className="text-input" value={editNote} onChange={(e) => setEditNote(e.target.value)}/><p className="modal-note">עריכה מתבצעת ישירות מול שורת ה-Google Sheet. שינוי חודש/שנה יעביר את הרשומה לגיליון המתאים.</p><button className="primary-action modal-action" disabled={!connected || !online || !editDate || !editStart || Boolean(pendingAction)} onClick={() => void saveEntryEdit()}>שמור שינויים</button></div></div>}
 

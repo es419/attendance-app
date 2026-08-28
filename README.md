@@ -160,3 +160,19 @@ The Google refresh token is kept only inside an encrypted HttpOnly cookie and is
 - Explicit Google Drive logout returns to a dedicated centered reconnect screen.
 - Attendance records use a single full-width row and expose gross time, break time, excess break time and credited time.
 - Bottom navigation is pinned to the viewport with a fixed safe-area-aware layout on iPhone and desktop.
+
+
+## UX updates
+- Quick clock-in and clock-out use a deliberate long press to prevent accidental attendance actions.
+- The app UI is intentionally independent from the Google Sheets schema; Sheets/Drive remain the data layer while the app presents a compact mobile-first view.
+- Attendance cards use collision-safe RTL/LTR layout for dates and times on iPhone-sized screens.
+
+
+## Performance + loading UX
+
+- Attendance records render only date, clock-in, clock-out, and final credited duration in the app UI. The Sheet remains the detailed backend.
+- GET requests are deduplicated, cached data is painted first, and file/attendance refreshes are freshness-throttled.
+- Drive folder discovery is lazy and only runs when folder management is opened.
+- Background Drive reconciliation runs every 3 minutes; foreground refreshes are debounced and cache-aware.
+- The UI clock refresh interval is reduced to avoid rerendering the whole app every second.
+- Initial boot and tab changes use the app icon as a branded loading transition.

@@ -1,4 +1,4 @@
-const CACHE = "attendance-shell-v5";
+const CACHE = "attendance-shell-v6";
 const SHELL = [
   "/",
   "/privacy",
