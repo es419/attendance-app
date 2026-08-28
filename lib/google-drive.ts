@@ -17,7 +17,7 @@ const SHEETS_API = "https://sheets.googleapis.com/v4";
 const ROOT_FOLDER_NAME = "נוכחות בעבודה";
 const FOLDER_MIME = "application/vnd.google-apps.folder";
 const SHEET_MIME = "application/vnd.google-apps.spreadsheet";
-const SCHEMA_VERSION = "6";
+const SCHEMA_VERSION = "7";
 const DEFAULT_BREAK_ALLOWANCE_MINUTES = 40;
 const DEFAULT_TARGET_HOURS = 120;
 const MAX_PAYROLL_ADDITIONS = 8;
@@ -263,11 +263,20 @@ async function ensureWorkspaceMetadata(file: DriveFile) {
   const props = file.appProperties || {};
   const breakAllowanceMinutes = String(normalizeBreakAllowance(props.breakAllowanceMinutes));
   const { props: payroll } = payrollProps(payrollSettingsFromWorkspace(file));
-  const desired = managedProps("workspace", { workspaceKey, breakAllowanceMinutes, ...payroll });
+  // A workspace is now a logical role of an existing Drive folder. We preserve
+  // the folder's original attendanceApp kind (root/folder/workspace) instead of
+  // turning it into another visible wrapper folder.
+  const desired: Record<string, string> = {
+    attendanceSchema: SCHEMA_VERSION,
+    workspaceKey,
+    workspaceDisabled: "false",
+    breakAllowanceMinutes,
+    ...payroll,
+  };
   if (
     props.attendanceSchema !== SCHEMA_VERSION ||
     props.workspaceKey !== workspaceKey ||
-    props.attendanceApp !== "workspace" ||
+    props.workspaceDisabled === "true" ||
     props.breakAllowanceMinutes !== breakAllowanceMinutes ||
     Object.entries(payroll).some(([key, value]) => (props[key] || "") !== value)
   ) {
@@ -277,8 +286,8 @@ async function ensureWorkspaceMetadata(file: DriveFile) {
 }
 
 async function listGlobalWorkspaces() {
-  const result = await driveList(`mimeType='${FOLDER_MIME}' and trashed=false and appProperties has { key='attendanceApp' and value='workspace' }`, "modifiedTime desc");
-  return result.files;
+  const result = await driveList(`mimeType='${FOLDER_MIME}' and trashed=false and appProperties has { key='workspaceKey' }`, "modifiedTime desc");
+  return result.files.filter((file) => Boolean(file.appProperties?.workspaceKey) && file.appProperties?.workspaceDisabled !== "true");
 }
 
 async function repairYearSheetsForWorkspace(workspace: DriveFile) {
@@ -324,14 +333,19 @@ export async function listAttendanceFiles(): Promise<AttendanceFile[]> {
   const files = await Promise.all(
     workspaces.map(async (workspace) => {
       const parentId = workspace.parents?.[0];
-      const resolved = await resolveParentPath(parentId, rootId);
+      const parentResolved = workspace.id === rootId
+        ? { path: [] as string[], insideRoot: true }
+        : await resolveParentPath(parentId, rootId);
+      const folderPath = workspace.id === rootId
+        ? []
+        : [...parentResolved.path, workspace.name];
       return {
         id: workspace.id,
-        name: workspace.name,
+        name: workspace.appProperties?.workspaceDisplayName || workspace.name,
         workspaceKey: workspace.appProperties?.workspaceKey,
-        folderPath: resolved.path,
-        parentId,
-        insideRoot: resolved.insideRoot,
+        folderPath,
+        parentId: workspace.id,
+        insideRoot: workspace.id === rootId || parentResolved.insideRoot,
         createdTime: workspace.createdTime,
         modifiedTime: workspace.modifiedTime,
         webViewLink: workspace.webViewLink,
@@ -345,8 +359,13 @@ export async function listAttendanceFiles(): Promise<AttendanceFile[]> {
 
 export async function assertAttendanceWorkspace(workspaceId: string) {
   const file = await getDriveFile(workspaceId);
-  if (file.trashed || file.mimeType !== FOLDER_MIME || file.appProperties?.attendanceApp !== "workspace") {
-    throw new Error("תיק הנוכחות לא נמצא או נמחק ב-Google Drive");
+  if (
+    file.trashed ||
+    file.mimeType !== FOLDER_MIME ||
+    !file.appProperties?.workspaceKey ||
+    file.appProperties?.workspaceDisabled === "true"
+  ) {
+    throw new Error("תיק הנוכחות לא נמצא או אינו פעיל ב-Google Drive");
   }
   return ensureWorkspaceMetadata(file);
 }
@@ -413,40 +432,44 @@ export async function createAttendanceFile(input: CreateAttendanceFileInput): Pr
   if (!path.length) throw new Error("צריך לתת שם לתיקייה");
   if (cleanName.length > 100) throw new Error("שם קובץ הנוכחות ארוך מדי");
 
+  // The final folder in the requested path IS the attendance workspace.
+  // We no longer create an extra visible wrapper folder such as “נוכחות 2026”.
   const target = await ensureFolderPath(path);
-  const duplicate = await driveList(`'${qEscape(target.parentId)}' in parents and mimeType='${FOLDER_MIME}' and name='${qEscape(cleanName)}' and trashed=false`);
-  if (duplicate.files.some((file) => file.appProperties?.attendanceApp === "workspace")) {
-    throw new Error("כבר קיים קובץ נוכחות בשם הזה בתיקייה שנבחרה");
+  const container = await getDriveFile(target.parentId);
+  if (container.appProperties?.workspaceKey && container.appProperties?.workspaceDisabled !== "true") {
+    throw new Error("כבר קיים קובץ נוכחות פעיל בתיקייה שנבחרה");
   }
 
   const workspaceKey = randomUUID();
-  const created = await createDriveFile({
-    name: cleanName,
-    mimeType: FOLDER_MIME,
-    parents: [target.parentId],
-    appProperties: managedProps("workspace", {
+  const baseProps = container.appProperties || {};
+  const updated = await patchDriveFile(container.id, {
+    appProperties: {
+      ...baseProps,
+      attendanceSchema: SCHEMA_VERSION,
       workspaceKey,
+      workspaceDisabled: "false",
+      workspaceDisplayName: cleanName,
       breakAllowanceMinutes: String(DEFAULT_BREAK_ALLOWANCE_MINUTES),
       ...payrollProps({
         targetHours: DEFAULT_TARGET_HOURS, hourlyRate: 0, pensionPercent: 0,
         trainingFundPercent: 0, nationalInsuranceHealthPercent: 0, additions: [],
       }).props,
-    }),
+    },
   });
 
   const now = israelNow();
-  await ensureYearSpreadsheet(created.id, now.year);
+  await ensureYearSpreadsheet(updated.id, now.year);
 
   return {
-    id: created.id,
-    name: created.name,
+    id: updated.id,
+    name: cleanName,
     workspaceKey,
     folderPath: target.path,
-    parentId: target.parentId,
+    parentId: updated.id,
     insideRoot: true,
-    createdTime: created.createdTime,
-    modifiedTime: created.modifiedTime,
-    webViewLink: created.webViewLink,
+    createdTime: updated.createdTime,
+    modifiedTime: updated.modifiedTime,
+    webViewLink: updated.webViewLink,
     breakAllowanceMinutes: DEFAULT_BREAK_ALLOWANCE_MINUTES,
     payrollSettings: {
       targetHours: DEFAULT_TARGET_HOURS, hourlyRate: 0, pensionPercent: 0,
@@ -459,8 +482,10 @@ export async function renameAttendanceFile(workspaceId: string, name: string) {
   const cleanName = name.trim();
   if (!cleanName) throw new Error("צריך לתת שם לקובץ");
   if (cleanName.length > 100) throw new Error("השם ארוך מדי");
-  await assertAttendanceWorkspace(workspaceId);
-  return patchDriveFile(workspaceId, { name: cleanName });
+  const workspace = await assertAttendanceWorkspace(workspaceId);
+  return patchDriveFile(workspaceId, {
+    appProperties: { ...(workspace.appProperties || {}), workspaceDisplayName: cleanName },
+  });
 }
 
 export async function moveAttendanceFile(workspaceId: string, pathParts: string[]) {
@@ -474,8 +499,19 @@ export async function moveAttendanceFile(workspaceId: string, pathParts: string[
 }
 
 export async function trashAttendanceFile(workspaceId: string) {
-  await assertAttendanceWorkspace(workspaceId);
-  await patchDriveFile(workspaceId, { trashed: true });
+  const workspace = await assertAttendanceWorkspace(workspaceId);
+  // Deleting an attendance file must never delete the user's containing folder.
+  // Only managed yearly Sheets are moved to Trash; the folder itself is preserved.
+  const yearFiles = await driveList(
+    `mimeType='${SHEET_MIME}' and trashed=false and appProperties has { key='attendanceWorkspaceId' and value='${qEscape(workspaceId)}' }`,
+    "modifiedTime desc"
+  );
+  for (const yearFile of yearFiles.files) {
+    await patchDriveFile(yearFile.id, { trashed: true });
+  }
+  await patchDriveFile(workspaceId, {
+    appProperties: { ...(workspace.appProperties || {}), workspaceDisabled: "true" },
+  });
 }
 
 async function recalculateWorkspaceDurations(workspaceId: string, allowanceMinutes: number) {
@@ -543,19 +579,15 @@ async function listFolderTree(rootId: string) {
   const folders: DriveFolder[] = [];
   const queue: Array<{ id: string; path: string[]; depth: number }> = [{ id: rootId, path: [], depth: 0 }];
   const visited = new Set<string>([rootId]);
-  const workspaceParents = new Map<string, number>();
   const workspaces = await listGlobalWorkspaces();
-  for (const workspace of workspaces) {
-    const parent = workspace.parents?.[0];
-    if (parent) workspaceParents.set(parent, (workspaceParents.get(parent) || 0) + 1);
-  }
+  const workspaceIds = new Set(workspaces.map((workspace) => workspace.id));
 
   while (queue.length) {
     const current = queue.shift()!;
     if (current.depth >= 10) continue;
     const children = await driveList(`'${qEscape(current.id)}' in parents and mimeType='${FOLDER_MIME}' and trashed=false`, "name");
     for (const child of children.files) {
-      if (visited.has(child.id) || child.appProperties?.attendanceApp === "workspace") continue;
+      if (visited.has(child.id)) continue;
       visited.add(child.id);
       const path = [...current.path, child.name];
       folders.push({
@@ -564,7 +596,7 @@ async function listFolderTree(rootId: string) {
         parentId: current.id,
         path,
         depth: current.depth + 1,
-        containsWorkspaces: workspaceParents.get(child.id) || 0,
+        containsWorkspaces: workspaceIds.has(child.id) ? 1 : 0,
       });
       queue.push({ id: child.id, path, depth: current.depth + 1 });
       if (folders.length > 1000) throw new Error("יש יותר מדי תיקיות תחת תיקיית הנוכחות");
@@ -583,23 +615,76 @@ export async function createAttendanceFolder(pathParts: string[]) {
   return { id: target.parentId, path: target.path };
 }
 
-export async function createSubfolderForWorkspace(workspaceId: string, name: string) {
+export async function createSiblingAttendanceWorkspace(workspaceId: string, name: string): Promise<AttendanceFile> {
   const workspace = await assertAttendanceWorkspace(workspaceId);
   const cleanName = name.trim();
-  if (!cleanName) throw new Error("צריך לתת שם לתת־התיקייה");
+  if (!cleanName) throw new Error("צריך לתת שם לתיקייה");
   if (cleanName.length > 100) throw new Error("שם התיקייה ארוך מדי");
 
-  const parentId = workspace.parents?.[0] || "root";
-  const folder = await ensureNamedFolder(parentId, cleanName);
+  // "Create a folder in this location" means create a SIBLING attendance
+  // workspace next to the current workspace folder. Example:
+  // נוכחות בעבודה / רשות המיסים / נוכחות 2026
+  // becomes, after creating "מחלקה נוספת":
+  // נוכחות בעבודה / מחלקה נוספת / נוכחות 2026
+  // We therefore create the new folder under the current workspace's parent,
+  // never inside the current workspace itself.
+  const parentId = workspace.parents?.[0];
+  if (!parentId) throw new Error("לא נמצא המיקום שמכיל את תיק הנוכחות הנוכחי");
+
+  const duplicate = await driveList(
+    `'${qEscape(parentId)}' in parents and mimeType='${FOLDER_MIME}' and name='${qEscape(cleanName)}' and trashed=false`,
+    "createdTime"
+  );
+  if (duplicate.files[0]?.id) throw new Error("כבר קיימת תיקייה בשם הזה ליד תיק הנוכחות הנוכחי");
+
+  const workspaceKey = randomUUID();
+  const payroll = payrollProps({
+    targetHours: DEFAULT_TARGET_HOURS,
+    hourlyRate: 0,
+    pensionPercent: 0,
+    trainingFundPercent: 0,
+    nationalInsuranceHealthPercent: 0,
+    additions: [],
+  });
+  const folder = await createDriveFile({
+    name: cleanName,
+    mimeType: FOLDER_MIME,
+    parents: [parentId],
+    appProperties: managedProps("folder", {
+      workspaceKey,
+      workspaceDisabled: "false",
+      workspaceDisplayName: cleanName,
+      breakAllowanceMinutes: String(DEFAULT_BREAK_ALLOWANCE_MINUTES),
+      ...payroll.props,
+    }),
+  });
+
+  try {
+    const now = israelNow();
+    await ensureYearSpreadsheet(folder.id, now.year);
+  } catch (error) {
+    // Avoid leaving a half-created managed workspace behind if Sheets setup
+    // fails. Trash only the new folder we just created.
+    try { await patchDriveFile(folder.id, { trashed: true }); } catch { /* best effort */ }
+    throw error;
+  }
+
   const appRootId = await ensureRootFolder();
   const resolvedParent = await resolveParentPath(parentId, appRootId);
+  const folderPath = [...resolvedParent.path, folder.name];
   return {
     id: folder.id,
-    name: folder.name,
-    parentId,
-    path: [...resolvedParent.path, folder.name],
-    depth: resolvedParent.path.length + 1,
-  } satisfies DriveFolder;
+    name: cleanName,
+    workspaceKey,
+    folderPath,
+    parentId: folder.id,
+    insideRoot: resolvedParent.insideRoot,
+    createdTime: folder.createdTime,
+    modifiedTime: folder.modifiedTime,
+    webViewLink: folder.webViewLink,
+    breakAllowanceMinutes: DEFAULT_BREAK_ALLOWANCE_MINUTES,
+    payrollSettings: payroll.normalized,
+  };
 }
 
 
@@ -640,7 +725,18 @@ async function spreadsheetHasUserData(spreadsheetId: string) {
   const metadata = await sheetsMetadata(spreadsheetId);
   const ranges = (metadata.sheets || []).map((sheet) => `'${sheet.properties.title.replace(/'/g, "''")}'`);
   if (!ranges.length) return false;
-  const response = await batchGetValues(spreadsheetId, ranges);
+
+  // Read formulas as formulas rather than their rendered result. This prevents a
+  // formula that currently displays an empty string from being mistaken for an
+  // empty spreadsheet and protects it from accidental overwrite.
+  const query = new URLSearchParams({
+    majorDimension: "ROWS",
+    valueRenderOption: "FORMULA",
+  });
+  for (const range of ranges) query.append("ranges", range);
+  const response = await googleJson<{ valueRanges?: Array<{ values?: unknown[][] }> }>(
+    `${SHEETS_API}/spreadsheets/${encodeURIComponent(spreadsheetId)}/values:batchGet?${query.toString()}`
+  );
   return (response.valueRanges || []).some((item) =>
     (item.values || []).some((row) => row.some((cell) => String(cell ?? "").trim() !== ""))
   );
@@ -691,57 +787,84 @@ export async function adoptDriveSpreadsheet(
 
   const now = israelNow();
   const originalParents = sheetFile.parents || [];
-  const targetParentId = originalParents[0] || "root";
+  // If a Sheet sits directly in My Drive, place it in the app root. Otherwise we
+  // keep it exactly in its current folder and use that folder as the workspace.
+  const appRootId = await ensureRootFolder();
+  const targetParentId = originalParents[0] && originalParents[0] !== "root" ? originalParents[0] : appRootId;
+  const container = await getDriveFile(targetParentId);
+  if (container.mimeType !== FOLDER_MIME || container.trashed) throw new Error("לא נמצאה תיקייה תקינה עבור הקובץ");
+  if (container.appProperties?.workspaceKey && container.appProperties?.workspaceDisabled !== "true") {
+    throw new Error("בתיקייה של הקובץ כבר קיים קובץ נוכחות פעיל");
+  }
+
   const workspaceKey = randomUUID();
   const workspaceName = (options.workspaceName?.trim() || workspaceNameFromSpreadsheet(sheetFile.name)).slice(0, 100);
   if (!workspaceName) throw new Error("לא ניתן לקבוע שם לקובץ הנוכחות");
 
-  const workspace = await createDriveFile({
-    name: workspaceName,
-    mimeType: FOLDER_MIME,
-    parents: [targetParentId],
-    appProperties: managedProps("workspace", {
+  const originalContainerProps = container.appProperties || {};
+  const workspace = await patchDriveFile(container.id, {
+    appProperties: {
+      ...originalContainerProps,
+      attendanceSchema: SCHEMA_VERSION,
       workspaceKey,
+      workspaceDisabled: "false",
+      workspaceDisplayName: workspaceName,
       breakAllowanceMinutes: String(DEFAULT_BREAK_ALLOWANCE_MINUTES),
       ...payrollProps({
         targetHours: DEFAULT_TARGET_HOURS, hourlyRate: 0, pensionPercent: 0,
         trainingFundPercent: 0, nationalInsuranceHealthPercent: 0, additions: [],
       }).props,
-    }),
+    },
   });
 
   try {
-    await resetSpreadsheetForAttendance(spreadsheetId);
+    // Empty Sheets are adopted non-destructively: keep the existing spreadsheet
+    // and its blank Sheet1, then add/format the attendance tabs in place. Only a
+    // confirmed non-empty file is cleared first.
+    if (hasData && options.confirmOverwrite) {
+      await resetSpreadsheetForAttendance(spreadsheetId);
+    }
+
     const yearProps = managedProps("year", {
       attendanceYear: String(now.year),
       attendanceWorkspaceId: workspace.id,
       workspaceKey,
     });
-    const moveParams: Record<string, string> = { addParents: workspace.id };
-    if (originalParents.length) moveParams.removeParents = originalParents.join(",");
+
+    const moveParams: Record<string, string> = {};
+    if (targetParentId !== (originalParents[0] || "root")) {
+      moveParams.addParents = targetParentId;
+      if (originalParents.length) moveParams.removeParents = originalParents.join(",");
+    }
     await patchDriveFile(
       spreadsheetId,
       { name: `נוכחות ${now.year}`, appProperties: { ...(sheetFile.appProperties || {}), ...yearProps } },
-      moveParams
+      Object.keys(moveParams).length ? moveParams : undefined
     );
     await initializeAttendanceSpreadsheet(spreadsheetId, true);
   } catch (error) {
-    try { await patchDriveFile(workspace.id, { trashed: true }); } catch { /* best effort cleanup */ }
+    try {
+      await patchDriveFile(workspace.id, {
+        appProperties: { ...originalContainerProps, workspaceDisabled: "true" },
+      });
+    } catch { /* best effort metadata cleanup */ }
     throw error;
   }
 
-  const appRootId = await ensureRootFolder();
-  const resolved = await resolveParentPath(targetParentId, appRootId);
+  const parentResolved = workspace.id === appRootId
+    ? { path: [] as string[], insideRoot: true }
+    : await resolveParentPath(workspace.parents?.[0], appRootId);
+  const folderPath = workspace.id === appRootId ? [] : [...parentResolved.path, workspace.name];
   return {
     requiresConfirmation: false,
     spreadsheetName: sheetFile.name,
     file: {
       id: workspace.id,
-      name: workspace.name,
+      name: workspaceName,
       workspaceKey,
-      folderPath: resolved.path,
-      parentId: targetParentId,
-      insideRoot: resolved.insideRoot,
+      folderPath,
+      parentId: workspace.id,
+      insideRoot: workspace.id === appRootId || parentResolved.insideRoot,
       createdTime: workspace.createdTime,
       modifiedTime: workspace.modifiedTime,
       webViewLink: workspace.webViewLink,

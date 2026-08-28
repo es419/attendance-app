@@ -213,3 +213,31 @@ Native date/time/number fields are constrained to the modal's available width on
 
 ## Daily pay on attendance records
 Each attendance record now shows the estimated total base pay for that calendar day, calculated from all credited work minutes on the same date multiplied by the workspace hourly rate. Monthly additions are intentionally not allocated to individual days.
+
+## Flat Drive layout for attendance years
+
+New attendance workspaces no longer create an extra visible wrapper folder. The final user-selected Drive folder becomes the logical workspace container, and yearly files sit directly inside it:
+
+`נוכחות בעבודה / רשות המיסים / נוכחות 2026`
+
+The workspace label used by the app is stored in Drive metadata and does not require renaming or creating another folder. Deleting a logical attendance file moves only its managed yearly Google Sheets files to Trash; it does not delete the containing user folder.
+
+Existing Google Sheets adoption is non-destructive when the file is empty: the existing file remains in place and is initialized in-place. If the Sheet contains data, the app shows a destructive confirmation first; data is cleared only after the user explicitly confirms. No additional attendance wrapper folder is created for adopted Sheets.
+
+## Update: create folder at current location
+
+The file menu action **"צור תיקייה במיקום הזה"** now creates a new managed attendance folder inside the current attendance location. The new folder is itself a workspace and receives a native Google Sheets file named `נוכחות <current year>` directly inside it. No extra wrapper folder is created. The newly created workspace is selected automatically in the app.
+
+## Folder creation semantics
+
+`צור תיקייה במיקום הזה` creates a new attendance folder **beside** the currently selected attendance folder (under the same parent). The new folder contains the current year's `נוכחות YYYY` Google Sheet directly, with no additional wrapper folder.
+
+Example:
+
+```text
+נוכחות בעבודה/
+├── רשות המיסים/
+│   └── נוכחות 2026
+└── מס הכנסה חיפה/
+    └── נוכחות 2026
+```
