@@ -208,6 +208,5 @@ The net figure is intentionally an estimate: it subtracts the configured percent
 - Saving payroll or break settings closes the drawer immediately and returns to Home while the server save completes.
 - Payroll settings remain stored per attendance workspace in Google Drive. Custom monthly additions are already supported, and the payroll model can be extended later with additional payslip components without changing attendance records.
 
-
-### Manual shift iPhone field fix
-The manual shift modal now renders date/time values with app-controlled visual fields layered over native iOS pickers, preventing RTL/date overlap while preserving the native iPhone picker experience.
+### iPhone manual shift form containment
+Native date/time/number fields are constrained to the modal's available width on small iPhone viewports. The fix preserves the native iOS pickers while preventing horizontal overflow.

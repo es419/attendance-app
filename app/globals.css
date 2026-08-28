@@ -1590,86 +1590,57 @@ h2 { margin: 0; font-size: 18px; letter-spacing: -.02em; }
   }
 }
 
-
-/* Native iOS date/time pickers with app-controlled visual fields.
-   The transparent native input keeps the iPhone picker, while the visible
-   value stays predictable in RTL and cannot overlap labels. */
-.manual-modal .native-picker-field {
-  position: relative;
+/* iPhone manual-shift modal containment fix.
+   Keep every native date/time/number control inside the viewport without
+   changing the native iOS picker behaviour. */
+.modal-backdrop {
+  max-width: 100vw;
+  overflow-x: hidden;
+}
+.manual-modal {
   width: 100%;
+  max-width: 420px;
   min-width: 0;
-  height: 48px;
-  border: 1px solid var(--line);
-  border-radius: 13px;
-  background: var(--surface-solid);
+  margin-inline: auto;
+}
+.manual-modal .two-fields,
+.manual-modal .two-fields > div,
+.manual-modal .text-input,
+.manual-modal input[type="date"],
+.manual-modal input[type="time"],
+.manual-modal input[type="number"] {
+  min-inline-size: 0;
+  max-inline-size: 100%;
+}
+.manual-modal input[type="date"],
+.manual-modal input[type="time"],
+.manual-modal input[type="number"] {
+  inline-size: 100%;
   overflow: hidden;
-  box-sizing: border-box;
-  transition: border-color .16s ease, box-shadow .16s ease, background .16s ease;
-}
-.manual-modal .native-picker-field:focus-within {
-  border-color: var(--muted);
-  box-shadow: 0 0 0 3px var(--surface-soft);
-}
-.manual-modal .native-picker-value {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  padding: 0 14px;
-  color: var(--text);
-  font-size: 16px;
-  font-weight: 700;
-  direction: ltr;
-  unicode-bidi: isolate;
-  font-variant-numeric: tabular-nums;
-  pointer-events: none;
-  white-space: nowrap;
-}
-.manual-modal .native-picker-value.is-placeholder {
-  color: var(--muted);
-  font-weight: 600;
-}
-.manual-modal .native-picker-input {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  opacity: 0;
-  cursor: pointer;
-  appearance: none;
-  -webkit-appearance: none;
-  font-size: 16px;
-}
-.manual-modal .native-picker-input::-webkit-date-and-time-value {
-  text-align: left;
 }
 
 @media (max-width: 430px) {
+  .modal-backdrop {
+    padding-inline: 14px;
+  }
   .manual-modal {
-    width: calc(100vw - 32px);
-    max-width: 380px;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    margin: 0;
     padding: 15px;
   }
-  .manual-modal .field-label {
-    margin-top: 2px;
-    font-size: 12px;
-  }
   .manual-modal .two-fields {
-    grid-template-columns: 1fr;
-    gap: 9px;
-  }
-  .manual-modal .native-picker-field,
-  .manual-modal .text-input {
+    grid-template-columns: minmax(0, 1fr);
     width: 100%;
-    height: 46px;
-    min-height: 46px;
   }
-  .manual-modal .native-picker-value {
-    padding-inline: 12px;
-    font-size: 15px;
+  .manual-modal .two-fields > div,
+  .manual-modal .text-input,
+  .manual-modal input[type="date"],
+  .manual-modal input[type="time"],
+  .manual-modal input[type="number"] {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
   }
 }
