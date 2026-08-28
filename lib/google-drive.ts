@@ -509,15 +509,57 @@ export async function moveAttendanceFile(workspaceId: string, pathParts: string[
 
 export async function trashAttendanceFile(workspaceId: string) {
   const workspace = await assertAttendanceWorkspace(workspaceId);
-  // Deleting an attendance file must never delete the user's containing folder.
-  // Only managed yearly Sheets are moved to Trash; the folder itself is preserved.
-  const yearFiles = await driveList(
+  const workspaceKey = workspace.appProperties?.workspaceKey || "";
+
+  // A workspace is represented by the user's folder, while the actual attendance
+  // data lives in one or more yearly Google Sheets inside it. Removing a file from
+  // the app must therefore trash the real Sheets in Drive, but must not trash the
+  // user's containing folder itself.
+  //
+  // Older app versions did not always stamp exactly the same metadata on every
+  // yearly Sheet, so relying on attendanceWorkspaceId alone can leave a Sheet in
+  // Drive. Collect candidates using every stable relation we have and de-duplicate
+  // them before trashing.
+  const byWorkspaceId = await driveList(
     `mimeType='${SHEET_MIME}' and trashed=false and appProperties has { key='attendanceWorkspaceId' and value='${qEscape(workspaceId)}' }`,
     "modifiedTime desc"
   );
-  for (const yearFile of yearFiles.files) {
+  const byWorkspaceKey = workspaceKey
+    ? await driveList(
+        `mimeType='${SHEET_MIME}' and trashed=false and appProperties has { key='workspaceKey' and value='${qEscape(workspaceKey)}' }`,
+        "modifiedTime desc"
+      )
+    : { files: [] as DriveFile[] };
+  const directChildren = await driveList(
+    `'${qEscape(workspaceId)}' in parents and mimeType='${SHEET_MIME}' and trashed=false`,
+    "modifiedTime desc"
+  );
+
+  const candidates = new Map<string, DriveFile>();
+  for (const file of [...byWorkspaceId.files, ...byWorkspaceKey.files, ...directChildren.files]) {
+    const props = file.appProperties || {};
+    const looksManaged =
+      props.attendanceApp === "year" ||
+      props.attendanceWorkspaceId === workspaceId ||
+      (workspaceKey && props.workspaceKey === workspaceKey) ||
+      /^נוכחות\s+\d{4}$/.test(file.name || "");
+    if (looksManaged) candidates.set(file.id, file);
+  }
+
+  // If the folder contains Sheets but none matched our legacy metadata/name rules,
+  // fail visibly instead of pretending deletion succeeded while leaving data in
+  // Drive. In normal app-created workspaces there should always be at least one
+  // managed year Sheet.
+  if (!candidates.size && directChildren.files.length) {
+    throw new Error("לא ניתן לזהות בבטחה את קובץ הנוכחות למחיקה ב-Google Drive");
+  }
+
+  for (const yearFile of candidates.values()) {
     await patchDriveFile(yearFile.id, { trashed: true });
   }
+
+  // Disable the folder as an attendance workspace only after the Drive files were
+  // successfully trashed. This prevents reconciliation from resurrecting the card.
   await patchDriveFile(workspaceId, {
     appProperties: { ...(workspace.appProperties || {}), workspaceDisabled: "true" },
   });
