@@ -626,7 +626,7 @@ export default function Page() {
     }
   }, [notify]);
 
-  const loadEntries = useCallback(async (workspaceId: string, year: number, month: number, force = false, silent = false) => {
+  const loadEntries = useCallback(async (workspaceId: string, year: number, month: number, force = false) => {
     const key = entryCacheKey(workspaceId, year, month);
     const cached = readJson<AttendanceEntry[]>(key, []);
     setEntries(cached);
@@ -661,7 +661,7 @@ export default function Page() {
         return;
       }
       if (cached.length) setEntries(cached);
-      if (!silent) notify(error instanceof Error ? error.message : "לא ניתן לקרוא רשומות");
+      notify(error instanceof Error ? error.message : "לא ניתן לקרוא רשומות");
     } finally {
       setLoadingEntries(false);
     }
@@ -669,7 +669,7 @@ export default function Page() {
 
   const activeCacheKey = useCallback((workspaceId: string) => `${ACTIVE_CACHE_PREFIX}${workspaceId}`, []);
 
-  const loadActiveShift = useCallback(async (workspaceId: string, force = false, silent = false) => {
+  const loadActiveShift = useCallback(async (workspaceId: string, force = false) => {
     const key = activeCacheKey(workspaceId);
     const cached = readJson<AttendanceEntry | null>(key, null);
     setActiveShift(cached);
@@ -705,7 +705,7 @@ export default function Page() {
         return null;
       }
       setActiveShift(cached);
-      if (!silent && error instanceof Error) notify(error.message);
+      if (error instanceof Error) notify(error.message);
       return cached;
     }
   }, [activeCacheKey, markWorkspaceMissing, status?.connected]);
@@ -866,7 +866,7 @@ export default function Page() {
       return;
     }
     window.localStorage.setItem("attendance:selectedWorkspace", selectedFileId);
-    void loadActiveShift(selectedFileId, false, true);
+    void loadActiveShift(selectedFileId);
   }, [selectedFileId, loadActiveShift]);
 
   useEffect(() => {
@@ -874,7 +874,7 @@ export default function Page() {
       setEntries([]);
       return;
     }
-    void loadEntries(selectedFileId, viewYear, viewMonth, false, true);
+    void loadEntries(selectedFileId, viewYear, viewMonth);
   }, [selectedFileId, viewYear, viewMonth, loadEntries]);
 
   useEffect(() => {
@@ -905,8 +905,8 @@ export default function Page() {
       lastForegroundSync = now;
       void loadFiles(true);
       if (selectedFileId) {
-        void loadEntries(selectedFileId, viewYear, viewMonth, false, true);
-        void loadActiveShift(selectedFileId, false, true);
+        void loadEntries(selectedFileId, viewYear, viewMonth);
+        void loadActiveShift(selectedFileId);
       }
       void flushQueue();
     };

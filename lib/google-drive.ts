@@ -350,7 +350,7 @@ async function ensureWorkspaceMetadata(file: DriveFile) {
 }
 
 async function listGlobalWorkspaces() {
-  const result = await driveList(`mimeType='${FOLDER_MIME}' and trashed=false and appProperties has { key='workspaceKey' }`, "modifiedTime desc");
+  const result = await driveList(`mimeType='${FOLDER_MIME}' and trashed=false and appProperties has { key='workspaceDisabled' and value='false' }`, "modifiedTime desc");
   return result.files.filter((file) => Boolean(file.appProperties?.workspaceKey) && file.appProperties?.workspaceDisabled !== "true");
 }
 
