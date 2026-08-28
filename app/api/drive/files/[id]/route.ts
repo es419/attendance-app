@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { moveAttendanceFile, renameAttendanceFile, trashAttendanceFile, updateBreakAllowanceMinutes } from "@/lib/google-drive";
+import { moveAttendanceFile, renameAttendanceFile, trashAttendanceFile, updateBreakAllowanceMinutes, updatePayrollSettings } from "@/lib/google-drive";
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -9,6 +9,22 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     if (typeof body.name === "string") result = await renameAttendanceFile(id, body.name);
     if (Array.isArray(body.folderPath)) result = await moveAttendanceFile(id, body.folderPath.map(String));
     if (body.breakAllowanceMinutes !== undefined) result = await updateBreakAllowanceMinutes(id, Number(body.breakAllowanceMinutes));
+    if (body.payrollSettings && typeof body.payrollSettings === "object") {
+      result = await updatePayrollSettings(id, {
+        targetHours: Number(body.payrollSettings.targetHours ?? 120),
+        hourlyRate: Number(body.payrollSettings.hourlyRate ?? 0),
+        pensionPercent: Number(body.payrollSettings.pensionPercent ?? 0),
+        trainingFundPercent: Number(body.payrollSettings.trainingFundPercent ?? 0),
+        nationalInsuranceHealthPercent: Number(body.payrollSettings.nationalInsuranceHealthPercent ?? 0),
+        additions: Array.isArray(body.payrollSettings.additions)
+          ? body.payrollSettings.additions.map((item: { id?: unknown; name?: unknown; amount?: unknown }, index: number) => ({
+              id: String(item?.id || `addition-${index + 1}`),
+              name: String(item?.name || ""),
+              amount: Number(item?.amount || 0),
+            }))
+          : [],
+      });
+    }
     if (!result) return NextResponse.json({ error: "לא נשלח שינוי" }, { status: 400 });
     return NextResponse.json({ file: result });
   } catch (error) {

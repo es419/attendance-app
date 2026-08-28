@@ -7,6 +7,7 @@ import type {
   CreateAttendanceFileInput,
   DriveFolder,
   DriveSpreadsheetCandidate,
+  PayrollSettings,
 } from "./types";
 
 export const driveConfigured = googleOAuthConfigured;
@@ -16,8 +17,10 @@ const SHEETS_API = "https://sheets.googleapis.com/v4";
 const ROOT_FOLDER_NAME = "נוכחות בעבודה";
 const FOLDER_MIME = "application/vnd.google-apps.folder";
 const SHEET_MIME = "application/vnd.google-apps.spreadsheet";
-const SCHEMA_VERSION = "5";
+const SCHEMA_VERSION = "6";
 const DEFAULT_BREAK_ALLOWANCE_MINUTES = 40;
+const DEFAULT_TARGET_HOURS = 120;
+const MAX_PAYROLL_ADDITIONS = 8;
 
 export const MONTHS_HE = [
   "ינואר",
@@ -198,16 +201,75 @@ function breakAllowanceFromWorkspace(file: DriveFile) {
   return normalizeBreakAllowance(file.appProperties?.breakAllowanceMinutes);
 }
 
+function normalizePayrollNumber(value: unknown, fallback = 0, min = 0, max = 1_000_000) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+function payrollSettingsFromWorkspace(file: DriveFile): PayrollSettings {
+  const props = file.appProperties || {};
+  const additions = Array.from({ length: MAX_PAYROLL_ADDITIONS }, (_, index) => {
+    const slot = index + 1;
+    const name = String(props[`payrollAddition${slot}Name`] || "").trim();
+    const amount = normalizePayrollNumber(props[`payrollAddition${slot}Amount`], 0);
+    return name && amount > 0 ? { id: `addition-${slot}`, name, amount } : null;
+  }).filter((item): item is { id: string; name: string; amount: number } => Boolean(item));
+
+  return {
+    targetHours: normalizePayrollNumber(props.payrollTargetHours, DEFAULT_TARGET_HOURS, 1, 1000),
+    hourlyRate: normalizePayrollNumber(props.payrollHourlyRate, 0, 0, 10000),
+    pensionPercent: normalizePayrollNumber(props.payrollPensionPercent, 0, 0, 100),
+    trainingFundPercent: normalizePayrollNumber(props.payrollTrainingFundPercent, 0, 0, 100),
+    nationalInsuranceHealthPercent: normalizePayrollNumber(props.payrollNationalHealthPercent, 0, 0, 100),
+    additions,
+  };
+}
+
+function payrollProps(settings: PayrollSettings) {
+  const normalized: PayrollSettings = {
+    targetHours: normalizePayrollNumber(settings.targetHours, DEFAULT_TARGET_HOURS, 1, 1000),
+    hourlyRate: normalizePayrollNumber(settings.hourlyRate, 0, 0, 10000),
+    pensionPercent: normalizePayrollNumber(settings.pensionPercent, 0, 0, 100),
+    trainingFundPercent: normalizePayrollNumber(settings.trainingFundPercent, 0, 0, 100),
+    nationalInsuranceHealthPercent: normalizePayrollNumber(settings.nationalInsuranceHealthPercent, 0, 0, 100),
+    additions: (settings.additions || [])
+      .map((item, index) => ({
+        id: item.id || `addition-${index + 1}`,
+        name: String(item.name || "").trim().slice(0, 48),
+        amount: normalizePayrollNumber(item.amount, 0, 0, 1_000_000),
+      }))
+      .filter((item) => item.name && item.amount > 0)
+      .slice(0, MAX_PAYROLL_ADDITIONS),
+  };
+
+  const props: Record<string, string> = {
+    payrollTargetHours: String(normalized.targetHours),
+    payrollHourlyRate: String(normalized.hourlyRate),
+    payrollPensionPercent: String(normalized.pensionPercent),
+    payrollTrainingFundPercent: String(normalized.trainingFundPercent),
+    payrollNationalHealthPercent: String(normalized.nationalInsuranceHealthPercent),
+  };
+  for (let index = 0; index < MAX_PAYROLL_ADDITIONS; index++) {
+    const addition = normalized.additions[index];
+    props[`payrollAddition${index + 1}Name`] = addition?.name || "-";
+    props[`payrollAddition${index + 1}Amount`] = addition ? String(addition.amount) : "0";
+  }
+  return { normalized, props };
+}
+
 async function ensureWorkspaceMetadata(file: DriveFile) {
   const workspaceKey = file.appProperties?.workspaceKey || randomUUID();
   const props = file.appProperties || {};
   const breakAllowanceMinutes = String(normalizeBreakAllowance(props.breakAllowanceMinutes));
-  const desired = managedProps("workspace", { workspaceKey, breakAllowanceMinutes });
+  const { props: payroll } = payrollProps(payrollSettingsFromWorkspace(file));
+  const desired = managedProps("workspace", { workspaceKey, breakAllowanceMinutes, ...payroll });
   if (
     props.attendanceSchema !== SCHEMA_VERSION ||
     props.workspaceKey !== workspaceKey ||
     props.attendanceApp !== "workspace" ||
-    props.breakAllowanceMinutes !== breakAllowanceMinutes
+    props.breakAllowanceMinutes !== breakAllowanceMinutes ||
+    Object.entries(payroll).some(([key, value]) => (props[key] || "") !== value)
   ) {
     return patchDriveFile(file.id, { appProperties: { ...props, ...desired } });
   }
@@ -274,6 +336,7 @@ export async function listAttendanceFiles(): Promise<AttendanceFile[]> {
         modifiedTime: workspace.modifiedTime,
         webViewLink: workspace.webViewLink,
         breakAllowanceMinutes: breakAllowanceFromWorkspace(workspace),
+        payrollSettings: payrollSettingsFromWorkspace(workspace),
       } satisfies AttendanceFile;
     })
   );
@@ -361,7 +424,14 @@ export async function createAttendanceFile(input: CreateAttendanceFileInput): Pr
     name: cleanName,
     mimeType: FOLDER_MIME,
     parents: [target.parentId],
-    appProperties: managedProps("workspace", { workspaceKey, breakAllowanceMinutes: String(DEFAULT_BREAK_ALLOWANCE_MINUTES) }),
+    appProperties: managedProps("workspace", {
+      workspaceKey,
+      breakAllowanceMinutes: String(DEFAULT_BREAK_ALLOWANCE_MINUTES),
+      ...payrollProps({
+        targetHours: DEFAULT_TARGET_HOURS, hourlyRate: 0, pensionPercent: 0,
+        trainingFundPercent: 0, nationalInsuranceHealthPercent: 0, additions: [],
+      }).props,
+    }),
   });
 
   const now = israelNow();
@@ -378,6 +448,10 @@ export async function createAttendanceFile(input: CreateAttendanceFileInput): Pr
     modifiedTime: created.modifiedTime,
     webViewLink: created.webViewLink,
     breakAllowanceMinutes: DEFAULT_BREAK_ALLOWANCE_MINUTES,
+    payrollSettings: {
+      targetHours: DEFAULT_TARGET_HOURS, hourlyRate: 0, pensionPercent: 0,
+      trainingFundPercent: 0, nationalInsuranceHealthPercent: 0, additions: [],
+    },
   };
 }
 
@@ -455,6 +529,14 @@ export async function updateBreakAllowanceMinutes(workspaceId: string, value: nu
   await patchDriveFile(workspaceId, { appProperties: { ...props, breakAllowanceMinutes: String(minutes) } });
   await recalculateWorkspaceDurations(workspaceId, minutes);
   return { breakAllowanceMinutes: minutes };
+}
+
+export async function updatePayrollSettings(workspaceId: string, input: PayrollSettings) {
+  const workspace = await assertAttendanceWorkspace(workspaceId);
+  const props = workspace.appProperties || {};
+  const { normalized, props: payroll } = payrollProps(input);
+  await patchDriveFile(workspaceId, { appProperties: { ...props, ...payroll } });
+  return normalized;
 }
 
 async function listFolderTree(rootId: string) {
@@ -621,6 +703,10 @@ export async function adoptDriveSpreadsheet(
     appProperties: managedProps("workspace", {
       workspaceKey,
       breakAllowanceMinutes: String(DEFAULT_BREAK_ALLOWANCE_MINUTES),
+      ...payrollProps({
+        targetHours: DEFAULT_TARGET_HOURS, hourlyRate: 0, pensionPercent: 0,
+        trainingFundPercent: 0, nationalInsuranceHealthPercent: 0, additions: [],
+      }).props,
     }),
   });
 
@@ -660,6 +746,10 @@ export async function adoptDriveSpreadsheet(
       modifiedTime: workspace.modifiedTime,
       webViewLink: workspace.webViewLink,
       breakAllowanceMinutes: DEFAULT_BREAK_ALLOWANCE_MINUTES,
+      payrollSettings: {
+        targetHours: DEFAULT_TARGET_HOURS, hourlyRate: 0, pensionPercent: 0,
+        trainingFundPercent: 0, nationalInsuranceHealthPercent: 0, additions: [],
+      },
     },
   };
 }

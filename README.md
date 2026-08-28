@@ -194,3 +194,9 @@ On touch devices, pulling down from the top and releasing after the threshold tr
 - If the selected spreadsheet already contains values, the app first shows a destructive confirmation. Only after explicit confirmation are all existing tabs/data rebuilt into the attendance schema.
 - The selected spreadsheet keeps its Drive identity (file ID), is moved into a newly managed attendance workspace in the same Drive location, and becomes `נוכחות <year>`.
 - From a file's `…` menu, **צור תת־תיקייה במיקום הזה** creates a folder beside the active attendance workspace, inside the Drive folder that currently contains it.
+
+## Monthly summary & payroll estimate
+
+The app now has a dedicated **Summary** tab. The monthly hours target moved out of Home and into Summary, alongside estimated gross and net pay. Per-workspace payroll settings are stored in Google Drive metadata and include hourly rate, target hours, employee pension percentage, employee training-fund percentage, combined National Insurance + health percentage, and up to eight fixed monthly additions.
+
+The net figure is intentionally an estimate: it subtracts the configured percentage deductions from estimated gross. Income tax is not calculated in this version.

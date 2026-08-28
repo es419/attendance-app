@@ -24,6 +24,22 @@ export type AttendanceEntry = {
   month?: number;
 };
 
+
+export type PayrollAddition = {
+  id: string;
+  name: string;
+  amount: number;
+};
+
+export type PayrollSettings = {
+  targetHours: number;
+  hourlyRate: number;
+  pensionPercent: number;
+  trainingFundPercent: number;
+  nationalInsuranceHealthPercent: number;
+  additions: PayrollAddition[];
+};
+
 export type AttendanceFile = {
   id: string;
   name: string;
@@ -35,6 +51,7 @@ export type AttendanceFile = {
   modifiedTime?: string;
   webViewLink?: string;
   breakAllowanceMinutes?: number;
+  payrollSettings?: PayrollSettings;
 };
 
 

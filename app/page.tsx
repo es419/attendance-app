@@ -10,9 +10,10 @@ import type {
   DriveSpreadsheetCandidate,
   DriveStatus,
   OfflineAttendanceEvent,
+  PayrollAddition,
 } from "@/lib/types";
 
-type Tab = "home" | "records" | "files";
+type Tab = "home" | "summary" | "records" | "files";
 type ThemePreference = "system" | "light" | "dark";
 type PendingAction =
   | "in"
@@ -34,7 +35,7 @@ type PendingAction =
   | null;
 
 const pad = (n: number) => String(n).padStart(2, "0");
-const TARGET_MINUTES = 120 * 60;
+const DEFAULT_TARGET_HOURS = 120;
 const MONTHS_HE = ["ינואר", "פברואר", "מרץ", "אפריל", "מאי", "יוני", "יולי", "אוגוסט", "ספטמבר", "אוקטובר", "נובמבר", "דצמבר"];
 const QUEUE_KEY = "attendance:offlineQueue:v1";
 const FILES_CACHE_KEY = "attendance:filesCache:v1";
@@ -46,6 +47,10 @@ const ACTIVE_FRESH_MS = 45_000;
 
 function entryCacheKey(workspaceId: string, year: number, month: number) {
   return `${ENTRY_CACHE_PREFIX}${workspaceId}:${year}:${month}`;
+}
+
+function formatMoney(value: number) {
+  return new Intl.NumberFormat("he-IL", { style: "currency", currency: "ILS", maximumFractionDigits: 0 }).format(Number.isFinite(value) ? value : 0);
 }
 
 function formatDuration(minutes: number) {
@@ -115,10 +120,11 @@ function readJson<T>(key: string, fallback: T): T {
   }
 }
 
-function Icon({ name }: { name: "home" | "records" | "files" | "more" | "plus" | "cloud" | "drive" | "trash" | "edit" | "external" | "close" | "coffee" | "clock" | "sun" | "moon" | "system" | "logout" | "folder" | "move" | "sync" | "offline" }) {
+function Icon({ name }: { name: "home" | "records" | "files" | "more" | "plus" | "cloud" | "drive" | "trash" | "edit" | "external" | "close" | "coffee" | "clock" | "sun" | "moon" | "system" | "logout" | "folder" | "move" | "sync" | "offline" | "summary" }) {
   const paths = {
     home: <><path d="M3 10.8 12 3l9 7.8"/><path d="M5.5 9.5V21h13V9.5"/><path d="M9.5 21v-7h5v7"/></>,
     records: <><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></>,
+    summary: <><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></>,
     files: <><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></>,
     folder: <><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M7 12h10"/></>,
     more: <><circle cx="5" cy="12" r="1" fill="currentColor"/><circle cx="12" cy="12" r="1" fill="currentColor"/><circle cx="19" cy="12" r="1" fill="currentColor"/></>,
@@ -398,6 +404,12 @@ export default function Page() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [theme, setTheme] = useState<ThemePreference>("system");
   const [breakAllowanceInput, setBreakAllowanceInput] = useState("40");
+  const [targetHoursInput, setTargetHoursInput] = useState(String(DEFAULT_TARGET_HOURS));
+  const [hourlyRateInput, setHourlyRateInput] = useState("0");
+  const [pensionPercentInput, setPensionPercentInput] = useState("0");
+  const [trainingFundPercentInput, setTrainingFundPercentInput] = useState("0");
+  const [nationalHealthPercentInput, setNationalHealthPercentInput] = useState("0");
+  const [payrollAdditions, setPayrollAdditions] = useState<PayrollAddition[]>([]);
 
   const [manualOpen, setManualOpen] = useState(false);
   const [manualDate, setManualDate] = useState(() => israelInputDate());
@@ -735,7 +747,7 @@ export default function Page() {
   }, [status?.connected, online, selectedFileId, viewYear, viewMonth, loadActiveShift, loadEntries, loadFiles, flushQueue]);
 
   useEffect(() => {
-    if (tab !== "home") return;
+    if (tab !== "home" && tab !== "summary") return;
     const current = israelParts();
     if (viewYear !== current.year || viewMonth !== current.month) {
       setViewYear(current.year);
@@ -751,10 +763,27 @@ export default function Page() {
 
   const selectedFile = files.find((file) => file.id === selectedFileId) || null;
   const breakAllowanceMinutes = selectedFile?.breakAllowanceMinutes ?? 40;
+  const payrollSettings = selectedFile?.payrollSettings || {
+    targetHours: DEFAULT_TARGET_HOURS,
+    hourlyRate: 0,
+    pensionPercent: 0,
+    trainingFundPercent: 0,
+    nationalInsuranceHealthPercent: 0,
+    additions: [] as PayrollAddition[],
+  };
 
   useEffect(() => {
     setBreakAllowanceInput(String(breakAllowanceMinutes));
   }, [breakAllowanceMinutes, selectedFileId]);
+
+  useEffect(() => {
+    setTargetHoursInput(String(payrollSettings.targetHours));
+    setHourlyRateInput(String(payrollSettings.hourlyRate));
+    setPensionPercentInput(String(payrollSettings.pensionPercent));
+    setTrainingFundPercentInput(String(payrollSettings.trainingFundPercent));
+    setNationalHealthPercentInput(String(payrollSettings.nationalInsuranceHealthPercent));
+    setPayrollAdditions(payrollSettings.additions.map((item, index) => ({ ...item, id: item.id || `addition-${index + 1}` })));
+  }, [selectedFileId, selectedFile?.payrollSettings, selectedFile?.modifiedTime]);
 
   const activeEntry = activeShift || entries.find((entry) => !entry.clockOut) || null;
   const activeBreak = activeEntry?.breaks?.find((item) => !item.endIso) || null;
@@ -771,8 +800,13 @@ export default function Page() {
     () => entries.reduce((sum, entry) => sum + (entry.clockOut ? entry.durationMinutes : entry.id === activeEntry?.id ? liveCredited : 0), 0),
     [activeEntry?.id, entries, liveCredited],
   );
-  const remaining = Math.max(0, TARGET_MINUTES - monthMinutes);
-  const progress = Math.min(100, (monthMinutes / TARGET_MINUTES) * 100);
+  const targetMinutes = Math.max(60, Math.round((payrollSettings.targetHours || DEFAULT_TARGET_HOURS) * 60));
+  const remaining = Math.max(0, targetMinutes - monthMinutes);
+  const progress = Math.min(100, (monthMinutes / targetMinutes) * 100);
+  const additionsTotal = payrollSettings.additions.reduce((sum, item) => sum + Math.max(0, Number(item.amount) || 0), 0);
+  const estimatedGross = Math.max(0, (monthMinutes / 60) * Math.max(0, payrollSettings.hourlyRate || 0) + additionsTotal);
+  const deductionPercent = Math.max(0, payrollSettings.pensionPercent || 0) + Math.max(0, payrollSettings.trainingFundPercent || 0) + Math.max(0, payrollSettings.nationalInsuranceHealthPercent || 0);
+  const estimatedNet = Math.max(0, estimatedGross - (estimatedGross * deductionPercent) / 100);
 
   const refreshCurrent = useCallback(async () => {
     if (!selectedFileId) return;
@@ -1171,6 +1205,44 @@ export default function Page() {
     }
   }
 
+  async function savePayrollSettings() {
+    if (!selectedFileId || !status?.connected || !online || pendingAction) return;
+    const numberValue = (value: string, fallback = 0) => {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : fallback;
+    };
+    const payload = {
+      targetHours: Math.max(1, Math.min(1000, numberValue(targetHoursInput, DEFAULT_TARGET_HOURS))),
+      hourlyRate: Math.max(0, Math.min(10000, numberValue(hourlyRateInput))),
+      pensionPercent: Math.max(0, Math.min(100, numberValue(pensionPercentInput))),
+      trainingFundPercent: Math.max(0, Math.min(100, numberValue(trainingFundPercentInput))),
+      nationalInsuranceHealthPercent: Math.max(0, Math.min(100, numberValue(nationalHealthPercentInput))),
+      additions: payrollAdditions
+        .map((item) => ({ ...item, name: item.name.trim(), amount: Math.max(0, Number(item.amount) || 0) }))
+        .filter((item) => item.name && item.amount > 0)
+        .slice(0, 8),
+    };
+    setPendingAction("settings");
+    try {
+      await api(`/api/drive/files/${encodeURIComponent(selectedFileId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ payrollSettings: payload }),
+      });
+      await loadFiles(true);
+      setMessage("הגדרות השכר נשמרו וסונכרנו ל-Google Drive");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "לא ניתן לשמור את הגדרות השכר");
+    } finally {
+      setPendingAction(null);
+    }
+  }
+
+  function addPayrollAddition() {
+    if (payrollAdditions.length >= 8) return setMessage("אפשר להוסיף עד 8 תוספות חודשיות");
+    setPayrollAdditions((items) => [...items, { id: crypto.randomUUID(), name: "", amount: 0 }]);
+  }
+
   async function disconnect() {
     if (pendingAction) return;
     setPendingAction("logout");
@@ -1216,7 +1288,7 @@ export default function Page() {
         <header className="topbar">
           <div>
             <p className="eyebrow">{selectedFile?.name || "נוכחות בעבודה"}</p>
-            <h1>{tab === "home" ? "היום" : tab === "records" ? "רשומות" : "הקבצים שלי"}</h1>
+            <h1>{tab === "home" ? "היום" : tab === "summary" ? "סיכום" : tab === "records" ? "רשומות" : "הקבצים שלי"}</h1>
           </div>
           <button className="icon-button" aria-label="פתח תפריט" onClick={() => setDrawerOpen(true)}><Icon name="more" /></button>
         </header>
@@ -1279,16 +1351,43 @@ export default function Page() {
                   <div className="break-rule"><Icon name="coffee" /><span>{breakAllowanceMinutes === 0 ? "כל זמן ההפסקה מנוכה מהשעות." : `${breakAllowanceMinutes} הדקות הראשונות של סך ההפסקות במשמרת לא מורידות שעות. רק הזמן שמעבר לכך מנוכה.`}</span></div>
                 </section>
 
-                <section className="panel">
-                  <div className="panel-title"><h2>{MONTHS_HE[israelParts().month - 1]}</h2><span>יעד 120 שעות</span></div>
-                  <div className="hours-line"><strong>{formatDuration(monthMinutes)}</strong><span>/ 120:00</span></div>
-                  <div className="progress-track"><div style={{ width: `${progress}%` }}/></div>
-                  <div className="remaining">נותרו {formatDuration(remaining)} שעות</div>
-                </section>
               </>
             )}
 
             {!disconnectedOnline && <div className={`sync-pill ${queue.length ? "sync-warning" : ""}`}><Icon name={!online ? "offline" : queue.length ? "sync" : "cloud"}/><span>{syncText}</span></div>}
+          </div>
+        )}
+
+        {tab === "summary" && (
+          <div className="screen-content summary-screen">
+            <div className="section-heading summary-heading">
+              <div><p className="eyebrow">{selectedFile?.name || "סיכום חודשי"}</p><h2>{MONTHS_HE[viewMonth - 1]} {viewYear}</h2></div>
+              <span className="live-label">{loadingEntries ? "מעדכן…" : online && connected ? "מסונכרן" : "מטמון"}</span>
+            </div>
+            {!selectedFile && <div className="empty-state">בחר קובץ נוכחות כדי לראות סיכום חודשי.</div>}
+            {selectedFile && (
+              <>
+                <section className="panel summary-target-card">
+                  <div className="panel-title"><h2>יעד שעות חודשי</h2><span>{payrollSettings.targetHours} שעות</span></div>
+                  <div className="summary-hours-line"><strong>{formatDuration(monthMinutes)}</strong><span>מתוך {formatDuration(targetMinutes)}</span></div>
+                  <div className="progress-track"><div style={{ width: `${progress}%` }}/></div>
+                  <div className="summary-target-footer"><span>{remaining > 0 ? `נותרו ${formatDuration(remaining)}` : "היעד הושלם"}</span><b>{Math.round(progress)}%</b></div>
+                </section>
+                <div className="salary-summary-grid">
+                  <section className="panel salary-card gross">
+                    <span>ברוטו משוער</span>
+                    <strong>{formatMoney(estimatedGross)}</strong>
+                    <small>{formatDuration(monthMinutes)} × {formatMoney(payrollSettings.hourlyRate)} לשעה{additionsTotal > 0 ? ` + ${formatMoney(additionsTotal)} תוספות` : ""}</small>
+                  </section>
+                  <section className="panel salary-card net">
+                    <span>נטו משוער</span>
+                    <strong>{formatMoney(estimatedNet)}</strong>
+                    <small>לאחר ניכויים שהוגדרו בתפריט הצד</small>
+                  </section>
+                </div>
+                <p className="summary-disclaimer">הנטו הוא אומדן לפי שיעורי הניכוי שהגדרת בלבד. בשלב הזה הוא לא מחשב מס הכנסה או רכיבי תלוש שלא הוגדרו.</p>
+              </>
+            )}
           </div>
         )}
 
@@ -1355,6 +1454,7 @@ export default function Page() {
 
       {!disconnectedOnline && <nav className="bottom-nav" aria-label="ניווט ראשי">
         <button className={tab === "home" ? "selected" : ""} onClick={() => setTab("home")}><Icon name="home"/>בית</button>
+        <button className={tab === "summary" ? "selected" : ""} onClick={() => setTab("summary")}><Icon name="summary"/>סיכום</button>
         <button className={tab === "records" ? "selected" : ""} onClick={() => setTab("records")}><Icon name="records"/>רשומות</button>
         <button className={tab === "files" ? "selected" : ""} onClick={() => setTab("files")}><Icon name="files"/>קבצים</button>
       </nav>}
@@ -1379,7 +1479,88 @@ export default function Page() {
 
       {overwriteCandidate && <div className="modal-backdrop destructive-backdrop"><div className="modal-card destructive-confirm"><div className="danger-modal-icon"><Icon name="trash"/></div><h2>הקובץ מכיל נתונים</h2><p>הקובץ “{overwriteCandidate.name}” אינו ריק. אם תמשיך, <strong>כל הגיליונות וכל הנתונים הקיימים בו יימחקו</strong>, והקובץ ייבנה מחדש לפי מבנה אפליקציית הנוכחות.</p><div className="warning-box">הפעולה משנה את אותו קובץ ב-Google Drive. ודא שאין בו מידע שאתה צריך לפני ההמשך.</div><div className="confirm-actions"><button className="sheet-cancel" disabled={pendingAction === "adopt"} onClick={() => setOverwriteCandidate(null)}>ביטול</button><button className="danger-action" disabled={pendingAction === "adopt"} onClick={() => void adoptExistingDriveFile(overwriteCandidate, true)}>{pendingAction === "adopt" ? "מוחק ובונה מחדש…" : "מחק ובנה מחדש"}</button></div></div></div>}
 
-      {drawerOpen && <div className="drawer-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setDrawerOpen(false)}><aside className="side-drawer"><div className="drawer-header"><div><p className="eyebrow">הגדרות</p><h2>אפליקציית נוכחות</h2></div><button className="icon-button compact" onClick={() => setDrawerOpen(false)}><Icon name="close"/></button></div><section className="drawer-section"><h3>מראה</h3><div className="theme-picker"><button className={theme === "system" ? "selected" : ""} onClick={() => setTheme("system")}><Icon name="system"/>מערכת</button><button className={theme === "light" ? "selected" : ""} onClick={() => setTheme("light")}><Icon name="sun"/>בהיר</button><button className={theme === "dark" ? "selected" : ""} onClick={() => setTheme("dark")}><Icon name="moon"/>חשוך</button></div></section>{selectedFile && <section className="drawer-section break-settings"><h3>כלל הפסקה · {selectedFile.name}</h3><p>כמה דקות הפסקה מותרות לפני שמתחיל ניכוי מהשעות. ההגדרה נשמרת ב-Drive של קובץ הנוכחות ומסתנכרנת בין מכשירים.</p><div className="break-presets">{[0, 20, 30, 40, 60].map((value) => <button key={value} className={Number(breakAllowanceInput) === value ? "selected" : ""} onClick={() => setBreakAllowanceInput(String(value))}>{value}</button>)}</div><div className="break-setting-row"><div className="minutes-input"><input type="number" min="0" max="600" inputMode="numeric" value={breakAllowanceInput} onChange={(e) => setBreakAllowanceInput(e.target.value)}/><span>דקות</span></div><button className="small-button" disabled={!connected || !online || pendingAction === "settings" || Number(breakAllowanceInput) === breakAllowanceMinutes} onClick={() => void saveBreakAllowance()}>{pendingAction === "settings" ? "שומר…" : "שמור"}</button></div><small>שינוי הכלל מחשב מחדש גם רשומות שכבר נסגרו כדי שהאפליקציה וה-Sheets יישארו עקביים.</small></section>}<section className="drawer-section sync-section"><h3>סנכרון</h3><div className="sync-summary"><Icon name={online ? "sync" : "offline"}/><div><strong>{syncText}</strong><span>Drive הוא מקור האמת. בהתחברות מחדש מתבצעת סריקה מלאה לפי metadata.</span></div></div>{queue.length > 0 && <><button className="small-button drawer-wide" disabled={!connected || !online || queueSyncing} onClick={() => void flushQueue()}><Icon name="sync"/>{queueSyncing ? "מסנכרן…" : `סנכרן ${queue.length} פעולות`}</button><button className="text-button danger-text" onClick={() => { if (confirm("למחוק את כל הפעולות שעדיין לא סונכרנו?")) saveQueue([]); }}>מחק פעולות ממתינות</button></>}</section>{connected ? <section className="drawer-section account-section"><h3>Google Drive</h3><div className="drawer-account"><div className="drive-badge"><Icon name="drive"/></div><div><strong>{status?.name || "Google"}</strong><span>{status?.email || "מחובר"}</span></div></div><button className="logout-button" disabled={pendingAction === "logout"} onClick={() => void disconnect()}><Icon name="logout"/>{pendingAction === "logout" ? "מתנתק…" : "התנתק מ-Google Drive"}</button></section> : configured && online ? <a className="primary-link" href="/api/auth/google">התחבר מחדש ל-Google Drive</a> : null}<div className="drawer-legal-links"><a href="/privacy">מדיניות פרטיות</a><a href="/terms">תנאי שימוש</a></div><p className="drawer-note">התנתקות מבטלת את הרשאת Google. המטמון המקומי נשאר לקריאה, ופעולות נוכחות יכולות להמתין עד לחיבור הבא. שינויים ידניים ב-Drive ייקלטו בסריקה המלאה לאחר ההתחברות.</p></aside></div>}
+      {drawerOpen && (
+        <div className="drawer-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setDrawerOpen(false)}>
+          <aside className="side-drawer">
+            <div className="drawer-header">
+              <div><p className="eyebrow">הגדרות</p><h2>אפליקציית נוכחות</h2></div>
+              <button className="icon-button compact" onClick={() => setDrawerOpen(false)}><Icon name="close"/></button>
+            </div>
+
+            <section className="drawer-section">
+              <h3>מראה</h3>
+              <div className="theme-picker">
+                <button className={theme === "system" ? "selected" : ""} onClick={() => setTheme("system")}><Icon name="system"/>מערכת</button>
+                <button className={theme === "light" ? "selected" : ""} onClick={() => setTheme("light")}><Icon name="sun"/>בהיר</button>
+                <button className={theme === "dark" ? "selected" : ""} onClick={() => setTheme("dark")}><Icon name="moon"/>חשוך</button>
+              </div>
+            </section>
+
+            {selectedFile && (
+              <details className="drawer-section payroll-settings">
+                <summary>שכר, ניכויים ותוספות</summary>
+                <p>ההגדרות נשמרות עם “{selectedFile.name}” ב-Google Drive ומשמשות למסך הסיכום.</p>
+
+                <div className="payroll-subsection">
+                  <h4>יעד ושכר</h4>
+                  <div className="payroll-grid two">
+                    <label><span>יעד חודשי</span><div className="payroll-input"><input type="number" min="1" step="1" inputMode="decimal" value={targetHoursInput} onChange={(e) => setTargetHoursInput(e.target.value)}/><b>שעות</b></div></label>
+                    <label><span>שכר שעתי</span><div className="payroll-input"><input type="number" min="0" step="0.01" inputMode="decimal" value={hourlyRateInput} onChange={(e) => setHourlyRateInput(e.target.value)}/><b>₪</b></div></label>
+                  </div>
+                </div>
+
+                <div className="payroll-subsection">
+                  <h4>ניכויים באחוזים</h4>
+                  <div className="payroll-deduction-list">
+                    <label><span>הפקדת עובד לפנסיה</span><div className="percent-input"><input type="number" min="0" max="100" step="0.01" inputMode="decimal" value={pensionPercentInput} onChange={(e) => setPensionPercentInput(e.target.value)}/><b>%</b></div></label>
+                    <label><span>הפקדת עובד לקרן השתלמות</span><div className="percent-input"><input type="number" min="0" max="100" step="0.01" inputMode="decimal" value={trainingFundPercentInput} onChange={(e) => setTrainingFundPercentInput(e.target.value)}/><b>%</b></div></label>
+                    <label><span>ביטוח לאומי + בריאות</span><div className="percent-input"><input type="number" min="0" max="100" step="0.01" inputMode="decimal" value={nationalHealthPercentInput} onChange={(e) => setNationalHealthPercentInput(e.target.value)}/><b>%</b></div></label>
+                  </div>
+                </div>
+
+                <div className="payroll-subsection">
+                  <div className="payroll-subtitle"><h4>תוספות חודשיות</h4><button className="text-button add-payroll-button" type="button" onClick={addPayrollAddition}><Icon name="plus"/>הוסף</button></div>
+                  {payrollAdditions.length === 0 && <div className="payroll-empty">אין תוספות מוגדרות.</div>}
+                  <div className="payroll-additions">
+                    {payrollAdditions.map((addition) => (
+                      <div className="payroll-addition-row" key={addition.id}>
+                        <input className="text-input" value={addition.name} onChange={(e) => setPayrollAdditions((items) => items.map((item) => item.id === addition.id ? { ...item, name: e.target.value } : item))} placeholder="לדוגמה: נסיעות" aria-label="שם התוספת"/>
+                        <div className="payroll-input compact"><input type="number" min="0" step="0.01" inputMode="decimal" value={addition.amount || ""} onChange={(e) => setPayrollAdditions((items) => items.map((item) => item.id === addition.id ? { ...item, amount: Number(e.target.value) || 0 } : item))}/><b>₪</b></div>
+                        <button className="icon-button compact danger-icon" type="button" aria-label="מחק תוספת" onClick={() => setPayrollAdditions((items) => items.filter((item) => item.id !== addition.id))}><Icon name="trash"/></button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <button className="small-button drawer-wide payroll-save" disabled={!connected || !online || pendingAction === "settings"} onClick={() => void savePayrollSettings()}>{pendingAction === "settings" ? "שומר…" : "שמור הגדרות שכר"}</button>
+                <small>הנטו המשוער מחושב כרגע מהברוטו פחות שלושת שיעורי הניכוי שהוגדרו. מס הכנסה אינו מחושב בשלב הזה.</small>
+              </details>
+            )}
+
+            {selectedFile && (
+              <details className="drawer-section break-settings">
+                <summary>כלל הפסקה · {selectedFile.name}</summary>
+                <p>כמה דקות הפסקה מותרות לפני שמתחיל ניכוי מהשעות. ההגדרה נשמרת ב-Drive ומסתנכרנת בין מכשירים.</p>
+                <div className="break-presets">{[0, 20, 30, 40, 60].map((value) => <button key={value} className={Number(breakAllowanceInput) === value ? "selected" : ""} onClick={() => setBreakAllowanceInput(String(value))}>{value}</button>)}</div>
+                <div className="break-setting-row"><div className="minutes-input"><input type="number" min="0" max="600" inputMode="numeric" value={breakAllowanceInput} onChange={(e) => setBreakAllowanceInput(e.target.value)}/><span>דקות</span></div><button className="small-button" disabled={!connected || !online || pendingAction === "settings" || Number(breakAllowanceInput) === breakAllowanceMinutes} onClick={() => void saveBreakAllowance()}>{pendingAction === "settings" ? "שומר…" : "שמור"}</button></div>
+                <small>שינוי הכלל מחשב מחדש גם רשומות שכבר נסגרו.</small>
+              </details>
+            )}
+
+            <section className="drawer-section sync-section">
+              <h3>סנכרון</h3>
+              <div className="sync-summary"><Icon name={online ? "sync" : "offline"}/><div><strong>{syncText}</strong><span>Drive הוא מקור האמת. בהתחברות מחדש מתבצעת סריקה מלאה לפי metadata.</span></div></div>
+              {queue.length > 0 && <><button className="small-button drawer-wide" disabled={!connected || !online || queueSyncing} onClick={() => void flushQueue()}><Icon name="sync"/>{queueSyncing ? "מסנכרן…" : `סנכרן ${queue.length} פעולות`}</button><button className="text-button danger-text" onClick={() => { if (confirm("למחוק את כל הפעולות שעדיין לא סונכרנו?")) saveQueue([]); }}>מחק פעולות ממתינות</button></>}
+            </section>
+
+            {connected ? (
+              <section className="drawer-section account-section"><h3>Google Drive</h3><div className="drawer-account"><div className="drive-badge"><Icon name="drive"/></div><div><strong>{status?.name || "Google"}</strong><span>{status?.email || "מחובר"}</span></div></div><button className="logout-button" disabled={pendingAction === "logout"} onClick={() => void disconnect()}><Icon name="logout"/>{pendingAction === "logout" ? "מתנתק…" : "התנתק מ-Google Drive"}</button></section>
+            ) : configured && online ? <a className="primary-link" href="/api/auth/google">התחבר מחדש ל-Google Drive</a> : null}
+            <div className="drawer-legal-links"><a href="/privacy">מדיניות פרטיות</a><a href="/terms">תנאי שימוש</a></div>
+            <p className="drawer-note">התנתקות מבטלת את הרשאת Google. המטמון המקומי נשאר לקריאה, ופעולות נוכחות יכולות להמתין עד לחיבור הבא.</p>
+          </aside>
+        </div>
+      )}
     </main>
   );
 }
