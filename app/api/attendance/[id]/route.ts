@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { deleteAttendanceEntry, updateAttendanceEntry } from "@/lib/google-drive";
+import { statusForGoogleError, deleteAttendanceEntry, updateAttendanceEntry } from "@/lib/google-drive";
 
 function locationFrom(body: Record<string, unknown>) {
   const year = Number(body.year);
@@ -23,7 +23,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     });
     return NextResponse.json({ entry });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "לא ניתן לערוך רשומה" }, { status: 400 });
+    return NextResponse.json({ error: error instanceof Error ? error.message : "לא ניתן לערוך רשומה" }, { status: statusForGoogleError(error) });
   }
 }
 
@@ -38,6 +38,6 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
     await deleteAttendanceEntry(workspaceId, id, { year, month });
     return NextResponse.json({ ok: true });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "לא ניתן למחוק רשומה" }, { status: 400 });
+    return NextResponse.json({ error: error instanceof Error ? error.message : "לא ניתן למחוק רשומה" }, { status: statusForGoogleError(error) });
   }
 }

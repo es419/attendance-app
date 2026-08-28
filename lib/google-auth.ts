@@ -56,29 +56,55 @@ export function authCookieName() {
   return AUTH_COOKIE;
 }
 
-export async function getGoogleAccessToken() {
+type CachedAccessToken = { token: string; expiresAt: number };
+const accessTokenCache = new Map<string, CachedAccessToken>();
+
+function accessTokenCacheKey(refreshToken: string) {
+  return crypto.createHash("sha256").update(refreshToken).digest("hex").slice(0, 24);
+}
+
+export async function getGoogleAccessToken(forceRefresh = false) {
   if (!googleOAuthConfigured) throw new Error("Google OAuth is not configured");
 
   const auth = await getStoredGoogleAuth();
   if (!auth?.refreshToken) throw new Error("Google Drive is not connected");
 
-  const response = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      client_id: process.env.GOOGLE_CLIENT_ID!,
-      client_secret: process.env.GOOGLE_CLIENT_SECRET!,
-      refresh_token: auth.refreshToken,
-      grant_type: "refresh_token",
-    }),
-    cache: "no-store",
-  });
+  const cacheKey = accessTokenCacheKey(auth.refreshToken);
+  const cached = accessTokenCache.get(cacheKey);
+  if (!forceRefresh && cached && cached.expiresAt - Date.now() > 60_000) return cached.token;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15_000);
+  let response: Response;
+  try {
+    response = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: process.env.GOOGLE_CLIENT_ID!,
+        client_secret: process.env.GOOGLE_CLIENT_SECRET!,
+        refresh_token: auth.refreshToken,
+        grant_type: "refresh_token",
+      }),
+      signal: controller.signal,
+      cache: "no-store",
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") throw new Error("החיבור ל-Google ארך יותר מדי זמן. נסה שוב");
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 
   const data = await response.json();
   if (!response.ok || !data.access_token) {
+    accessTokenCache.delete(cacheKey);
     throw new Error(data.error_description || "Could not refresh Google access token");
   }
-  return data.access_token as string;
+  const token = data.access_token as string;
+  const expiresInMs = Math.max(60, Number(data.expires_in || 3600)) * 1000;
+  accessTokenCache.set(cacheKey, { token, expiresAt: Date.now() + expiresInMs });
+  return token;
 }
 
 export function getGoogleRedirectUri(requestUrl: string) {

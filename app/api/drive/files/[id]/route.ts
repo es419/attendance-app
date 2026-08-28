@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { moveAttendanceFile, renameAttendanceFile, trashAttendanceFile, updateBreakAllowanceMinutes, updatePayrollSettings } from "@/lib/google-drive";
+import { statusForGoogleError, moveAttendanceFile, renameAttendanceFile, trashAttendanceFile, updateBreakAllowanceMinutes, updatePayrollSettings } from "@/lib/google-drive";
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -28,7 +28,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     if (!result) return NextResponse.json({ error: "לא נשלח שינוי" }, { status: 400 });
     return NextResponse.json({ file: result });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "לא ניתן לעדכן את הקובץ" }, { status: 400 });
+    return NextResponse.json({ error: error instanceof Error ? error.message : "לא ניתן לעדכן את הקובץ" }, { status: statusForGoogleError(error) });
   }
 }
 
@@ -38,6 +38,6 @@ export async function DELETE(_request: Request, { params }: { params: Promise<{ 
     await trashAttendanceFile(id);
     return NextResponse.json({ ok: true });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "לא ניתן למחוק את הקובץ" }, { status: 400 });
+    return NextResponse.json({ error: error instanceof Error ? error.message : "לא ניתן למחוק את הקובץ" }, { status: statusForGoogleError(error) });
   }
 }

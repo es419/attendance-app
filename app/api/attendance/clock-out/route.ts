@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { clockOut } from "@/lib/google-drive";
+import { statusForGoogleError, clockOut } from "@/lib/google-drive";
 
 export async function POST(request: Request) {
   try {
@@ -13,6 +13,6 @@ export async function POST(request: Request) {
     });
     return NextResponse.json({ entry });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "לא ניתן לבצע יציאה" }, { status: 400 });
+    return NextResponse.json({ error: error instanceof Error ? error.message : "לא ניתן לבצע יציאה" }, { status: statusForGoogleError(error) });
   }
 }

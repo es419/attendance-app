@@ -22,6 +22,21 @@ const DEFAULT_BREAK_ALLOWANCE_MINUTES = 40;
 const DEFAULT_TARGET_HOURS = 120;
 const MAX_PAYROLL_ADDITIONS = 8;
 
+export class GoogleApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "GoogleApiError";
+    this.status = status;
+  }
+}
+
+export function statusForGoogleError(error: unknown, fallback = 400) {
+  if (error instanceof GoogleApiError) return error.status;
+  if (error instanceof Error && /not connected|אינו מחובר|מנותק/i.test(error.message)) return 401;
+  return fallback;
+}
+
 export const MONTHS_HE = [
   "ינואר",
   "פברואר",
@@ -60,25 +75,71 @@ function qEscape(value: string) {
   return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 }
 
-async function googleJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const token = await getGoogleAccessToken();
-  const response = await fetch(url, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-      ...(init?.headers || {}),
-    },
-    cache: "no-store",
-  });
+const GOOGLE_REQUEST_TIMEOUT_MS = 20_000;
 
-  const text = await response.text();
-  const data = text ? JSON.parse(text) : {};
-  if (!response.ok) {
-    const message = data?.error?.message || data?.error_description || `Google API error ${response.status}`;
-    throw new Error(message);
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function googleJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const method = (init?.method || "GET").toUpperCase();
+  const mayRetry = ["GET", "HEAD", "PATCH", "PUT", "DELETE"].includes(method);
+  const maxAttempts = mayRetry ? 3 : 2; // POST gets a second attempt only for a rejected (401) token.
+  let forceFreshToken = false;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const token = await getGoogleAccessToken(forceFreshToken);
+    forceFreshToken = false;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), GOOGLE_REQUEST_TIMEOUT_MS);
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        ...init,
+        signal: controller.signal,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+          ...(init?.headers || {}),
+        },
+        cache: "no-store",
+      });
+    } catch (error) {
+      if (mayRetry && attempt + 1 < maxAttempts) {
+        await sleep(350 * (attempt + 1));
+        continue;
+      }
+      if (error instanceof Error && error.name === "AbortError") throw new Error("החיבור ל-Google ארך יותר מדי זמן. נסה שוב");
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    const text = await response.text();
+    let data: any = {};
+    try { data = text ? JSON.parse(text) : {}; } catch { data = {}; }
+
+    // A cached access token may have been revoked early. Refresh it once without
+    // forcing the user through OAuth again.
+    if (response.status === 401 && attempt === 0) {
+      forceFreshToken = true;
+      continue;
+    }
+
+    if (!response.ok) {
+      const retryable = response.status === 408 || response.status === 429 || response.status >= 500;
+      if (retryable && mayRetry && attempt < 2) {
+        const retryAfterSeconds = Number(response.headers.get("retry-after") || 0);
+        const wait = retryAfterSeconds > 0 ? retryAfterSeconds * 1000 : 400 * (attempt + 1);
+        await sleep(Math.min(wait, 3000));
+        continue;
+      }
+      const message = data?.error?.message || data?.error_description || `Google API error ${response.status}`;
+      throw new GoogleApiError(message, response.status);
+    }
+    return data as T;
   }
-  return data as T;
+  throw new Error("Google API request failed");
 }
 
 type DriveFile = {
@@ -164,7 +225,7 @@ export async function ensureRootFolder() {
   return "root";
 }
 
-async function resolveParentPath(parentId: string | undefined, appRootId: string) {
+async function resolveParentPath(parentId: string | undefined, appRootId: string, fileCache?: Map<string, DriveFile>) {
   if (!parentId) return { path: [] as string[], insideRoot: false };
   const path: string[] = [];
   const visited = new Set<string>();
@@ -179,7 +240,11 @@ async function resolveParentPath(parentId: string | undefined, appRootId: string
     if (currentId === "root" || visited.has(currentId)) break;
     visited.add(currentId);
     try {
-      const item = await getDriveFile(currentId);
+      let item: DriveFile | undefined = fileCache?.get(currentId);
+      if (!item) {
+        item = await getDriveFile(currentId);
+        fileCache?.set(currentId, item);
+      }
       if (item.trashed) break;
       if (item.name && item.name !== "My Drive") path.unshift(item.name);
       currentId = item.parents?.[0];
@@ -320,22 +385,28 @@ export async function reconcileDrive() {
   const rawWorkspaces = await listGlobalWorkspaces();
   const repaired: DriveFile[] = [];
   for (const raw of rawWorkspaces) {
+    const schemaWasCurrent = raw.appProperties?.attendanceSchema === SCHEMA_VERSION;
     const workspace = await ensureWorkspaceMetadata(raw);
     repaired.push(workspace);
-    await repairYearSheetsForWorkspace(workspace);
+    // Year-sheet repair is a migration task, not something that should run on every
+    // foreground refresh. Re-running it for every workspace caused needless Drive
+    // reads and made the UI feel slow.
+    if (!schemaWasCurrent) await repairYearSheetsForWorkspace(workspace);
   }
   return { rootId, workspaces: repaired };
 }
 
 export async function listAttendanceFiles(): Promise<AttendanceFile[]> {
   const { rootId, workspaces } = await reconcileDrive();
+  const pathRootId = process.env.GOOGLE_DRIVE_ROOT_FOLDER_ID?.trim() || "root";
+  const pathFileCache = new Map<string, DriveFile>(workspaces.map((item) => [item.id, item]));
   const files = await Promise.all(
     workspaces.map(async (workspace) => {
       const parentId = workspace.parents?.[0];
-      const parentResolved = workspace.id === rootId
+      const parentResolved = workspace.id === pathRootId
         ? { path: [] as string[], insideRoot: true }
-        : await resolveParentPath(parentId, rootId);
-      const folderPath = workspace.id === rootId
+        : await resolveParentPath(parentId, pathRootId, pathFileCache);
+      const folderPath = workspace.id === pathRootId
         ? []
         : [...parentResolved.path, workspace.name];
       return {
@@ -344,7 +415,7 @@ export async function listAttendanceFiles(): Promise<AttendanceFile[]> {
         workspaceKey: workspace.appProperties?.workspaceKey,
         folderPath,
         parentId: workspace.id,
-        insideRoot: workspace.id === rootId || parentResolved.insideRoot,
+        insideRoot: workspace.id === pathRootId || parentResolved.insideRoot,
         createdTime: workspace.createdTime,
         modifiedTime: workspace.modifiedTime,
         webViewLink: workspace.webViewLink,
@@ -459,6 +530,7 @@ export async function createAttendanceFile(input: CreateAttendanceFileInput): Pr
       workspaceKey,
       workspaceDisabled: "false",
       workspaceDisplayName: cleanName,
+      attendanceYearFileBaseName: normalizeYearFileBaseName(cleanName),
       breakAllowanceMinutes: String(DEFAULT_BREAK_ALLOWANCE_MINUTES),
       ...payrollProps({
         targetHours: DEFAULT_TARGET_HOURS, hourlyRate: 0, pensionPercent: 0,
@@ -489,19 +561,40 @@ export async function createAttendanceFile(input: CreateAttendanceFileInput): Pr
 }
 
 export async function renameAttendanceFile(workspaceId: string, name: string) {
-  const cleanName = name.trim();
-  if (!cleanName) throw new Error("צריך לתת שם לקובץ");
-  if (cleanName.length > 100) throw new Error("השם ארוך מדי");
+  const cleanName = normalizeYearFileBaseName(name);
   const workspace = await assertAttendanceWorkspace(workspaceId);
-  return patchDriveFile(workspaceId, {
-    appProperties: { ...(workspace.appProperties || {}), workspaceDisplayName: cleanName },
+  const props = workspace.appProperties || {};
+  const updatedWorkspace = await patchDriveFile(workspaceId, {
+    appProperties: {
+      ...props,
+      workspaceDisplayName: cleanName,
+      attendanceYearFileBaseName: cleanName,
+    },
   });
+
+  // Keep the visible Drive files in sync with the app name. The folder name is a
+  // separate concept and is intentionally left untouched.
+  const yearFiles = await driveList(
+    `mimeType='${SHEET_MIME}' and trashed=false and appProperties has { key='attendanceWorkspaceId' and value='${qEscape(workspaceId)}' }`,
+    "modifiedTime desc"
+  );
+  await Promise.all(yearFiles.files.map(async (file) => {
+    const year = Number(file.appProperties?.attendanceYear || 0);
+    if (!Number.isInteger(year) || year < 2000 || year > 2100) return;
+    const expected = `${cleanName} ${year}`;
+    if (file.name !== expected) await patchDriveFile(file.id, { name: expected });
+  }));
+  return updatedWorkspace;
 }
 
 export async function moveAttendanceFile(workspaceId: string, pathParts: string[]) {
   const workspace = await assertAttendanceWorkspace(workspaceId);
-  const target = await ensureFolderPath(pathParts);
+  const target = await ensureFolderPath(pathParts, "root");
+  if (target.parentId === workspaceId) throw new Error("אי אפשר להעביר תיק נוכחות לתוך עצמו");
   const oldParents = workspace.parents || [];
+  if (oldParents.length === 1 && oldParents[0] === target.parentId) {
+    return { file: workspace, folderPath: target.path, parentId: target.parentId };
+  }
   const params: Record<string, string> = { addParents: target.parentId };
   if (oldParents.length) params.removeParents = oldParents.join(",");
   const updated = await patchDriveFile(workspaceId, {}, params);
@@ -573,40 +666,52 @@ async function recalculateWorkspaceDurations(workspaceId: string, allowanceMinut
   );
 
   for (const yearFile of yearFiles.files) {
+    const metadata = await sheetsMetadata(yearFile.id);
+    const monthSheets: Array<{ name: string; month: number }> = [];
     for (let month = 1; month <= 12; month++) {
-      const sheetName = await resolveMonthSheet(yearFile.id, month, false);
-      if (!sheetName) continue;
-      const safeName = sheetName.replace(/'/g, "''");
-      const response = await getValues(yearFile.id, `'${safeName}'!A2:P2000`);
-      const updates: Array<{ range: string; values: unknown[][] }> = [];
+      const marker = (metadata.developerMetadata || []).find(
+        (item) => item.metadataKey === "attendanceMonth" && Number(item.metadataValue) === month && item.location?.sheetId
+      );
+      const byMarker = marker?.location?.sheetId
+        ? metadata.sheets?.find((item) => item.properties.sheetId === marker.location!.sheetId)
+        : undefined;
+      const sheet = byMarker || metadata.sheets?.find((item) => item.properties.title === MONTHS_HE[month - 1]);
+      if (sheet) monthSheets.push({ name: sheet.properties.title, month });
+    }
+    if (!monthSheets.length) continue;
 
-      for (let index = 0; index < (response.values || []).length; index++) {
-        const row = response.values![index] || [];
-        if (!row[0] || !row[4]) continue;
-        const parsedBreaks = parseBreaks(row[9]);
-        const breakMinutes = Number(row[10] || 0) || breakMinutesAt(parsedBreaks, row[8] ? new Date(row[8]) : new Date());
-        let grossMinutes = Number(row[11] || 0);
-        if (!grossMinutes && row[7] && row[8]) {
-          const start = Date.parse(row[7]);
-          const end = Date.parse(row[8]);
-          if (Number.isFinite(start) && Number.isFinite(end) && end > start) grossMinutes = Math.floor((end - start) / 60000);
+    const ranges = monthSheets.map(({ name }) => `'${name.replace(/'/g, "''")}'!A2:P2000`);
+    const response = await batchGetValues(yearFile.id, ranges);
+    const updates: Array<{ range: string; values: unknown[][] }> = [];
+
+    monthSheets.forEach(({ name }, monthIndex) => {
+      const safeName = name.replace(/'/g, "''");
+      const rows = response.valueRanges?.[monthIndex]?.values || [];
+      rows.forEach((row, index) => {
+        const normalized = normalizeAttendanceRow(row || []);
+        if (!normalized[0] || !normalized[4]) return;
+        const parsedBreaks = parseBreaks(normalized[9]);
+        const breakMinutes = Number(normalized[10] || 0) || breakMinutesAt(parsedBreaks, normalized[8] ? new Date(normalized[8]) : new Date());
+        let grossMinutes = Number(normalized[11] || 0);
+        if (!grossMinutes && normalized[7] && normalized[8]) {
+          const start = Date.parse(normalized[7]);
+          const finish = Date.parse(normalized[8]);
+          if (Number.isFinite(start) && Number.isFinite(finish) && finish > start) grossMinutes = Math.floor((finish - start) / 60000);
         }
-        if (!grossMinutes) continue;
+        if (!grossMinutes) return;
         const next = creditedMinutes(grossMinutes, breakMinutes, allowanceMinutes);
         const excess = breakExcessMinutes(breakMinutes, allowanceMinutes);
-        if (Number(row[5] || 0) !== next) {
-          updates.push({ range: `'${safeName}'!F${index + 2}`, values: [[next]] });
-        }
-        if (Number(row[14] || 0) !== excess || Number(row[15] ?? -1) !== allowanceMinutes) {
-          updates.push({ range: `'${safeName}'!O${index + 2}:P${index + 2}`, values: [[excess, allowanceMinutes]] });
+        const rowNumber = index + 2;
+        if (Number(normalized[5] || 0) !== next) updates.push({ range: `'${safeName}'!F${rowNumber}`, values: [[next]] });
+        if (Number(normalized[14] || 0) !== excess || Number(normalized[15] ?? -1) !== allowanceMinutes) {
+          updates.push({ range: `'${safeName}'!O${rowNumber}:P${rowNumber}`, values: [[excess, allowanceMinutes]] });
         }
         const summary = breakSummary(parsedBreaks, breakMinutes);
-        if (String(row[13] || "") !== summary) {
-          updates.push({ range: `'${safeName}'!N${index + 2}`, values: [[summary]] });
-        }
-      }
-      if (updates.length) await batchUpdateValues(yearFile.id, updates);
-    }
+        if (String(normalized[13] || "") !== summary) updates.push({ range: `'${safeName}'!N${rowNumber}`, values: [[summary]] });
+      });
+    });
+
+    if (updates.length) await batchUpdateValues(yearFile.id, updates);
   }
 }
 
@@ -735,8 +840,7 @@ export async function createSiblingAttendanceWorkspace(workspaceId: string, name
     throw error;
   }
 
-  const appRootId = await ensureRootFolder();
-  const resolvedParent = await resolveParentPath(parentId, appRootId);
+  const resolvedParent = await resolveParentPath(parentId, "root");
   const folderPath = [...resolvedParent.path, folder.name];
   return {
     id: folder.id,
@@ -853,19 +957,22 @@ export async function adoptDriveSpreadsheet(
 
   const now = israelNow();
   const originalParents = sheetFile.parents || [];
-  // If a Sheet sits directly in My Drive, place it in the app root. Otherwise we
-  // keep it exactly in its current folder and use that folder as the workspace.
-  const appRootId = await ensureRootFolder();
-  const targetParentId = originalParents[0] && originalParents[0] !== "root" ? originalParents[0] : appRootId;
-  const container = await getDriveFile(targetParentId);
+  const workspaceName = (options.workspaceName?.trim() || workspaceNameFromSpreadsheet(sheetFile.name)).slice(0, 100);
+  if (!workspaceName) throw new Error("לא ניתן לקבוע שם לקובץ הנוכחות");
+
+  // A workspace is a real folder. Never attach workspace metadata to My Drive's
+  // special `root` object. If the chosen Sheet lives directly in My Drive, create
+  // a normal sibling folder for it and move the Sheet there.
+  const directInMyDrive = !originalParents[0] || originalParents[0] === "root";
+  const targetFolder = directInMyDrive ? await ensureNamedFolder("root", workspaceName) : null;
+  const targetParentId = targetFolder?.id || originalParents[0]!;
+  const container = targetFolder || await getDriveFile(targetParentId);
   if (container.mimeType !== FOLDER_MIME || container.trashed) throw new Error("לא נמצאה תיקייה תקינה עבור הקובץ");
   if (container.appProperties?.workspaceKey && container.appProperties?.workspaceDisabled !== "true") {
     throw new Error("בתיקייה של הקובץ כבר קיים קובץ נוכחות פעיל");
   }
 
   const workspaceKey = randomUUID();
-  const workspaceName = (options.workspaceName?.trim() || workspaceNameFromSpreadsheet(sheetFile.name)).slice(0, 100);
-  if (!workspaceName) throw new Error("לא ניתן לקבוע שם לקובץ הנוכחות");
 
   const originalContainerProps = container.appProperties || {};
   const workspace = await patchDriveFile(container.id, {
@@ -875,6 +982,7 @@ export async function adoptDriveSpreadsheet(
       workspaceKey,
       workspaceDisabled: "false",
       workspaceDisplayName: workspaceName,
+      attendanceYearFileBaseName: normalizeYearFileBaseName(workspaceName),
       breakAllowanceMinutes: String(DEFAULT_BREAK_ALLOWANCE_MINUTES),
       ...payrollProps({
         targetHours: DEFAULT_TARGET_HOURS, hourlyRate: 0, pensionPercent: 0,
@@ -904,7 +1012,7 @@ export async function adoptDriveSpreadsheet(
     }
     await patchDriveFile(
       spreadsheetId,
-      { name: `נוכחות ${now.year}`, appProperties: { ...(sheetFile.appProperties || {}), ...yearProps } },
+      { name: `${normalizeYearFileBaseName(workspaceName)} ${now.year}`, appProperties: { ...(sheetFile.appProperties || {}), ...yearProps } },
       Object.keys(moveParams).length ? moveParams : undefined
     );
     await initializeAttendanceSpreadsheet(spreadsheetId, true);
@@ -917,10 +1025,8 @@ export async function adoptDriveSpreadsheet(
     throw error;
   }
 
-  const parentResolved = workspace.id === appRootId
-    ? { path: [] as string[], insideRoot: true }
-    : await resolveParentPath(workspace.parents?.[0], appRootId);
-  const folderPath = workspace.id === appRootId ? [] : [...parentResolved.path, workspace.name];
+  const parentResolved = await resolveParentPath(workspace.parents?.[0], "root");
+  const folderPath = [...parentResolved.path, workspace.name];
   return {
     requiresConfirmation: false,
     spreadsheetName: sheetFile.name,
@@ -930,7 +1036,7 @@ export async function adoptDriveSpreadsheet(
       workspaceKey,
       folderPath,
       parentId: workspace.id,
-      insideRoot: workspace.id === appRootId || parentResolved.insideRoot,
+      insideRoot: parentResolved.insideRoot,
       createdTime: workspace.createdTime,
       modifiedTime: workspace.modifiedTime,
       webViewLink: workspace.webViewLink,
@@ -976,7 +1082,8 @@ async function findYearSpreadsheet(workspaceId: string, year: number) {
   const marked = await driveList(`${base} and appProperties has { key='attendanceYear' and value='${year}' }`);
   if (marked.files[0]?.id) return { file: marked.files[0], needsInit: true };
 
-  const named = await driveList(`${base} and (name='${year}' or name='נוכחות ${year}')`);
+  const expectedName = yearSpreadsheetName(workspace, year);
+  const named = await driveList(`${base} and (name='${year}' or name='${qEscape(expectedName)}' or name='נוכחות ${year}')`);
   if (named.files[0]?.id) return { file: named.files[0], needsInit: true };
   return null;
 }
@@ -1019,13 +1126,6 @@ async function batchGetValues(spreadsheetId: string, ranges: string[]) {
 async function updateValues(spreadsheetId: string, range: string, values: unknown[][]) {
   return googleJson(`${SHEETS_API}/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`, {
     method: "PUT",
-    body: JSON.stringify({ range, majorDimension: "ROWS", values }),
-  });
-}
-
-async function appendValues(spreadsheetId: string, range: string, values: unknown[][]) {
-  return googleJson(`${SHEETS_API}/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`, {
-    method: "POST",
     body: JSON.stringify({ range, majorDimension: "ROWS", values }),
   });
 }
@@ -1430,7 +1530,7 @@ async function readMonthRows(workspaceId: string, year: number, month: number, c
   }
   if (!spreadsheetId) return null;
 
-  const sheetName = await resolveMonthSheet(spreadsheetId, month, true);
+  const sheetName = await resolveMonthSheet(spreadsheetId, month, createIfMissing);
   if (!sheetName) return null;
   const safeSheetName = sheetName.replace(/'/g, "''");
   const response = await getValues(spreadsheetId, `'${safeSheetName}'!A2:P2000`);
@@ -1477,32 +1577,6 @@ async function findOpenEntry(workspaceId: string, now = new Date()) {
     for (let i = monthData.rows.length - 1; i >= 0; i--) {
       const row = monthData.rows[i];
       if (row.entry.id && !row.entry.clockOut && row.entry.clockInIso) return { ...monthData, ...row };
-    }
-  }
-  return null;
-}
-
-async function findOpenEntryGlobal(workspaceId: string, now = new Date()) {
-  const recent = await findOpenEntry(workspaceId, now);
-  if (recent) return recent;
-
-  const yearFiles = await driveList(
-    `mimeType='${SHEET_MIME}' and trashed=false and appProperties has { key='attendanceApp' and value='year' } and appProperties has { key='attendanceWorkspaceId' and value='${qEscape(workspaceId)}' }`,
-    "modifiedTime desc"
-  );
-  const years = Array.from(new Set(yearFiles.files
-    .map((file) => Number(file.appProperties?.attendanceYear || 0))
-    .filter((year) => Number.isInteger(year) && year >= 2000 && year <= 2100)))
-    .sort((a, b) => b - a);
-
-  for (const year of years) {
-    for (let month = 12; month >= 1; month--) {
-      const monthData = await readMonthRows(workspaceId, year, month, false);
-      if (!monthData) continue;
-      for (let index = monthData.rows.length - 1; index >= 0; index--) {
-        const row = monthData.rows[index];
-        if (row.entry.id && !row.entry.clockOut && row.entry.clockInIso) return { ...monthData, ...row };
-      }
     }
   }
   return null;
@@ -1724,7 +1798,12 @@ function localIsraelDateTimeToDate(dateValue: string, timeValue: string) {
     if (!diff) break;
     candidate += diff;
   }
-  return new Date(candidate);
+  const result = new Date(candidate);
+  const check = israelNow(result);
+  if (check.year !== year || check.month !== month || check.day !== day || check.timeDisplay !== `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`) {
+    throw new Error("תאריך או שעה לא תקינים");
+  }
+  return result;
 }
 
 function entryRow(input: {

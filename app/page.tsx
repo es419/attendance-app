@@ -247,10 +247,17 @@ async function api<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> 
 
   const request = (async () => {
     let response: Response;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 25_000);
     try {
-      response = await fetch(input, { ...init, cache: "no-store", credentials: "include" });
-    } catch {
+      response = await fetch(input, { ...init, signal: init?.signal || controller.signal, cache: "no-store", credentials: "include" });
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        throw new ApiRequestError("הפעולה ארכה יותר מדי זמן. נסה שוב", true, 408);
+      }
       throw new ApiRequestError("אין כרגע חיבור לרשת", true);
+    } finally {
+      window.clearTimeout(timeout);
     }
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new ApiRequestError(data.error || "משהו השתבש", false, response.status);
@@ -316,15 +323,18 @@ function optimisticEvent(entries: AttendanceEntry[], event: OfflineAttendanceEve
   if (event.type === "manual" && event.payload?.date && event.payload.clockIn && event.payload.clockOut) {
     if (copy.some((entry) => entry.id === event.entryId)) return copy;
     const [y, m, d] = event.payload.date.split("-").map(Number);
-    const start = new Date(`${event.payload.date}T${event.payload.clockIn}:00`);
-    let end = new Date(`${event.payload.date}T${event.payload.clockOut}:00`);
-    if (end <= start) end = new Date(end.getTime() + 86400000);
-    const gross = Math.max(1, Math.floor((end.getTime() - start.getTime()) / 60000));
+    const [startHour, startMinute] = event.payload.clockIn.split(":").map(Number);
+    const [endHour, endMinute] = event.payload.clockOut.split(":").map(Number);
+    const startTotal = startHour * 60 + startMinute;
+    let endTotal = endHour * 60 + endMinute;
+    if (endTotal <= startTotal) endTotal += 24 * 60;
+    const gross = Math.max(1, endTotal - startTotal);
     const breaks = Number(event.payload.breakMinutes || 0);
+    const weekdayAnchor = new Date(Date.UTC(y, m - 1, d, 12));
     return [{
       id: event.entryId,
       date: `${pad(d)}.${pad(m)}.${y}`,
-      weekday: new Intl.DateTimeFormat("he-IL", { weekday: "long" }).format(start),
+      weekday: new Intl.DateTimeFormat("he-IL", { timeZone: "Asia/Jerusalem", weekday: "long" }).format(weekdayAnchor),
       clockIn: event.payload.clockIn,
       clockOut: event.payload.clockOut,
       durationMinutes: creditedMinutes(gross, breaks, breakAllowanceMinutes),
@@ -550,7 +560,7 @@ export default function Page() {
     }
   }, []);
 
-  const loadFiles = useCallback(async (force = false) => {
+  const loadFiles = useCallback(async (force = false, silent = false) => {
     if (!navigator.onLine) return;
     const nowMs = Date.now();
     if (!force && nowMs - filesFetchedAtRef.current < FILES_FRESH_MS) return;
@@ -605,11 +615,16 @@ export default function Page() {
         setSelectedFileId((current) => current && availableIds.has(current) ? current : merged.find((file) => !file.missingFromDrive)?.id || null);
       }
     } catch (error) {
-      notify(error instanceof Error ? error.message : "לא ניתן לסנכרן את Drive");
+      if (error instanceof ApiRequestError && error.status === 401) {
+        setStatus((current) => ({ configured: current?.configured ?? true, connected: false, mode: "disconnected" }));
+        if (!silent) notify("החיבור ל-Google פג. התחבר מחדש כדי להמשיך לסנכרן");
+      } else if (!silent) {
+        notify(error instanceof Error ? error.message : "לא ניתן לסנכרן את Drive");
+      }
     } finally {
       setLoadingFiles(false);
     }
-  }, []);
+  }, [notify]);
 
   const loadEntries = useCallback(async (workspaceId: string, year: number, month: number, force = false) => {
     const key = entryCacheKey(workspaceId, year, month);
@@ -624,8 +639,22 @@ export default function Page() {
     try {
       const data = await api<{ entries: AttendanceEntry[] }>(`/api/attendance?workspaceId=${encodeURIComponent(workspaceId)}&year=${year}&month=${month}`);
       entriesFetchedAtRef.current.set(key, Date.now());
-      setEntries(data.entries);
-      window.localStorage.setItem(key, JSON.stringify(data.entries));
+
+      // Never let a foreground refresh erase optimistic actions that are still
+      // waiting in the durable queue. Rebase them over the latest server state.
+      const cachedFiles = readJson<AttendanceFile[]>(FILES_CACHE_KEY, []);
+      const allowance = cachedFiles.find((file) => file.id === workspaceId)?.breakAllowanceMinutes ?? 40;
+      let merged = data.entries;
+      const pending = readJson<OfflineAttendanceEvent[]>(QUEUE_KEY, []).filter((event) => {
+        if (event.workspaceId !== workspaceId) return false;
+        const eventYear = event.year || (event.payload?.date ? Number(event.payload.date.slice(0, 4)) : year);
+        const eventMonth = event.month || (event.payload?.date ? Number(event.payload.date.slice(5, 7)) : month);
+        return eventYear === year && eventMonth === month;
+      });
+      for (const event of pending) merged = optimisticEvent(merged, event, allowance);
+
+      setEntries(merged);
+      window.localStorage.setItem(key, JSON.stringify(merged));
     } catch (error) {
       if (isWorkspaceMissingError(error)) {
         markWorkspaceMissing(workspaceId);
@@ -652,10 +681,24 @@ export default function Page() {
     try {
       const data = await api<{ entry: AttendanceEntry | null }>(`/api/attendance/active?workspaceId=${encodeURIComponent(workspaceId)}`);
       activeFetchedAtRef.current.set(workspaceId, Date.now());
-      setActiveShift(data.entry);
-      if (data.entry) window.localStorage.setItem(key, JSON.stringify(data.entry));
+
+      // Preserve/replay unsynced quick actions so a refresh cannot make an
+      // optimistic active shift disappear while its Google write is in flight.
+      const pending = readJson<OfflineAttendanceEvent[]>(QUEUE_KEY, []).filter((event) => event.workspaceId === workspaceId && event.type !== "manual");
+      const cachedFiles = readJson<AttendanceFile[]>(FILES_CACHE_KEY, []);
+      const allowance = cachedFiles.find((file) => file.id === workspaceId)?.breakAllowanceMinutes ?? 40;
+      let resolved: AttendanceEntry | null = data.entry;
+      for (const event of pending) {
+        if (event.type === "clock-in" && !resolved) resolved = optimisticEvent([], event, allowance)[0] || null;
+        else if (resolved && resolved.id === event.entryId) {
+          const next = optimisticEvent([resolved], event, allowance)[0] || resolved;
+          resolved = event.type === "clock-out" ? null : next;
+        }
+      }
+      setActiveShift(resolved);
+      if (resolved) window.localStorage.setItem(key, JSON.stringify(resolved));
       else window.localStorage.removeItem(key);
-      return data.entry;
+      return resolved;
     } catch (error) {
       if (isWorkspaceMissingError(error)) {
         markWorkspaceMissing(workspaceId);
@@ -739,7 +782,8 @@ export default function Page() {
             // A 4xx response is a permanent validation/conflict failure. Keeping it
             // at the head of a FIFO queue would block every newer clock action forever.
             // Move it aside, preserve it locally for recovery/debugging, and continue.
-            if (error instanceof ApiRequestError && error.status >= 400 && error.status < 500) {
+            const permanentStatuses = new Set([400, 404, 409, 422]);
+            if (error instanceof ApiRequestError && permanentStatuses.has(error.status)) {
               const failed = readJson<Array<{ event: OfflineAttendanceEvent; reason: string; failedAt: string }>>(FAILED_QUEUE_KEY, []);
               window.localStorage.setItem(FAILED_QUEUE_KEY, JSON.stringify([
                 ...failed,
@@ -748,6 +792,15 @@ export default function Page() {
               const latest = readJson<OfflineAttendanceEvent[]>(QUEUE_KEY, []);
               saveQueue(latest.filter((item) => item.id !== event.id));
               rejected++;
+
+              // Roll back the rejected optimistic event by re-reading the
+              // authoritative month. loadEntries will re-apply newer pending events.
+              const eventYear = event.year || (event.payload?.date ? Number(event.payload.date.slice(0, 4)) : viewYear);
+              const eventMonth = event.month || (event.payload?.date ? Number(event.payload.date.slice(5, 7)) : viewMonth);
+              if (event.workspaceId === selectedFileId) {
+                await loadEntries(event.workspaceId, eventYear, eventMonth, true);
+                await loadActiveShift(event.workspaceId, true);
+              }
               continue;
             }
 
@@ -758,13 +811,16 @@ export default function Page() {
           notify(synced
             ? `${synced} פעולות סונכרנו · ${rejected} פעולה ישנה לא הייתה תקינה והועברה הצידה`
             : `${rejected} פעולה ישנה לא הייתה תקינה והועברה הצידה`);
-        } else if (synced) {
+        } else if (synced > 1) {
           notify(`${synced} פעולות סונכרנו ברקע`);
         }
       } catch (error) {
         // Network/temporary server errors keep the event at the head of the queue
         // so the app can retry later without losing the user's action.
-        if (!(error instanceof ApiRequestError && error.network)) {
+        if (error instanceof ApiRequestError && error.status === 401) {
+          setStatus((current) => ({ configured: current?.configured ?? true, connected: false, mode: "disconnected" }));
+          notify("החיבור ל-Google פג. הפעולות נשמרו במכשיר ויחכו להתחברות מחדש");
+        } else if (!(error instanceof ApiRequestError && (error.network || error.status === 429 || error.status === 408))) {
           notify(error instanceof Error ? `הסנכרון ינסה שוב בהמשך: ${error.message}` : "הסנכרון ינסה שוב בהמשך");
         }
       } finally {
@@ -778,7 +834,7 @@ export default function Page() {
     } finally {
       queueFlushPromiseRef.current = null;
     }
-  }, [applyConfirmedEntry, saveQueue, status?.connected]);
+  }, [applyConfirmedEntry, loadActiveShift, loadEntries, saveQueue, selectedFileId, status?.connected, viewMonth, viewYear]);
 
   useEffect(() => {
     let cancelled = false;
@@ -786,7 +842,7 @@ export default function Page() {
     void (async () => {
       const currentStatus = await loadStatus();
       const finishBoot = () => { if (!cancelled) setBootLoading(false); };
-      const remaining = Math.max(0, 420 - (Date.now() - startedAt));
+      const remaining = Math.max(0, 220 - (Date.now() - startedAt));
       window.setTimeout(finishBoot, remaining);
       if (currentStatus.connected && navigator.onLine) void loadFiles(true);
     })();
@@ -799,7 +855,7 @@ export default function Page() {
       return;
     }
     setPageLoading(true);
-    const id = window.setTimeout(() => setPageLoading(false), 260);
+    const id = window.setTimeout(() => setPageLoading(false), 140);
     return () => window.clearTimeout(id);
   }, [tab]);
 
@@ -836,7 +892,7 @@ export default function Page() {
     // Google Sheet every few seconds can exhaust the Sheets per-user read quota,
     // especially while schema migrations or multiple tabs are active.
     const backgroundSync = () => {
-      void loadFiles();
+      void loadFiles(false, true);
       void flushQueue();
     };
 
@@ -964,7 +1020,7 @@ export default function Page() {
     } finally {
       // Avoid a flash that is too short to read while still ending exactly after
       // the refresh work is complete (with a tiny minimum for visual continuity).
-      const delay = Math.max(0, 360 - (Date.now() - startedAt));
+      const delay = Math.max(0, 240 - (Date.now() - startedAt));
       window.setTimeout(() => {
         setRefreshLoading(false);
         refreshBusyRef.current = false;
@@ -1160,7 +1216,7 @@ export default function Page() {
   }
 
   function openMove(file: AttendanceFile) {
-    setMenuFile(null); setPathFile(file); setPathValue((file.folderPath || []).join(" / "));
+    setMenuFile(null); setPathFile(file); setPathValue((file.folderPath || []).slice(0, -1).join(" / "));
   }
 
   async function moveFile() {

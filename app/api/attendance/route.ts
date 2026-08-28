@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getAttendanceEntries, israelNow } from "@/lib/google-drive";
+import { statusForGoogleError, getAttendanceEntries, israelNow } from "@/lib/google-drive";
 
 export async function GET(request: Request) {
   try {
@@ -17,6 +17,6 @@ export async function GET(request: Request) {
     const entries = await getAttendanceEntries(workspaceId, year, month);
     return NextResponse.json({ entries, year, month });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "לא ניתן לקרוא רשומות" }, { status: 400 });
+    return NextResponse.json({ error: error instanceof Error ? error.message : "לא ניתן לקרוא רשומות" }, { status: statusForGoogleError(error) });
   }
 }

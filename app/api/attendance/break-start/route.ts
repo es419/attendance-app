@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { startBreak } from "@/lib/google-drive";
+import { statusForGoogleError, startBreak } from "@/lib/google-drive";
 
 export async function POST(request: Request) {
   try {
@@ -14,6 +14,6 @@ export async function POST(request: Request) {
     });
     return NextResponse.json({ entry });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "לא ניתן לצאת להפסקה" }, { status: 400 });
+    return NextResponse.json({ error: error instanceof Error ? error.message : "לא ניתן לצאת להפסקה" }, { status: statusForGoogleError(error) });
   }
 }

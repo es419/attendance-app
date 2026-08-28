@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getActiveAttendanceEntry } from "@/lib/google-drive";
+import { statusForGoogleError, getActiveAttendanceEntry } from "@/lib/google-drive";
 
 export async function GET(request: Request) {
   try {
@@ -9,6 +9,6 @@ export async function GET(request: Request) {
     const entry = await getActiveAttendanceEntry(workspaceId);
     return NextResponse.json({ entry });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "לא ניתן לקרוא משמרת פעילה" }, { status: 400 });
+    return NextResponse.json({ error: error instanceof Error ? error.message : "לא ניתן לקרוא משמרת פעילה" }, { status: statusForGoogleError(error) });
   }
 }

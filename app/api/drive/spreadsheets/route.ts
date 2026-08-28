@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { adoptDriveSpreadsheet, listAdoptableDriveSpreadsheets } from "@/lib/google-drive";
+import { statusForGoogleError, adoptDriveSpreadsheet, listAdoptableDriveSpreadsheets } from "@/lib/google-drive";
 
 export async function GET() {
   try {
@@ -7,7 +7,7 @@ export async function GET() {
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "לא ניתן לקרוא קבצי Google Sheets מ-Drive" },
-      { status: 400 }
+      { status: statusForGoogleError(error) }
     );
   }
 }
@@ -26,7 +26,7 @@ export async function POST(request: Request) {
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "לא ניתן להשתמש בקובץ שנבחר" },
-      { status: 400 }
+      { status: statusForGoogleError(error) }
     );
   }
 }
