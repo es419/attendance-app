@@ -113,7 +113,7 @@ GOOGLE_DRIVE_ROOT_FOLDER_ID=
 Never commit `.env.local` or OAuth client JSON files.
 
 ## Persistent active shift
-Quick clock-in writes an active-shift pointer into the workspace Drive metadata and also caches it locally. The app can therefore restore an open shift even after a browser/app restart or a month boundary. Clock-out clears the pointer. If metadata is missing or stale, the app scans managed year/month sheets and repairs the pointer.
+Quick clock-in writes an active-shift pointer into the workspace Drive metadata and also caches it locally. The app can therefore restore an open shift even after a browser/app restart or a month boundary. Clock-out clears the pointer. If metadata is missing or stale, the app checks the current/previous month and repairs the pointer without a costly historical scan.
 
 ## Break allowance setting
 Each attendance workspace stores `breakAllowanceMinutes` in Drive appProperties. Default is 40. The side drawer offers presets and a custom numeric value. Updating the rule recalculates closed rows in managed yearly Sheets so historical totals and the app stay consistent.
@@ -121,3 +121,9 @@ Each attendance workspace stores `breakAllowanceMinutes` in Drive appProperties.
 ### Google Sheets – human-readable break columns
 
 The annual Sheets keep technical identifiers/ISO/JSON columns hidden, while the visible view includes `סה״כ הפסקה (דק׳)`, `פירוט הפסקות`, `דקות חריגה`, `כלל הפסקה (דק׳)`, `דקות משמרת ברוטו`, and `דקות עבודה בפועל`. Existing year files are upgraded automatically when the app next opens/uses them.
+
+## Quick clock-in quota protection
+Quick attendance mutations now apply the authoritative row returned by the API directly to the local cache/UI instead of immediately re-reading both the month and active-shift endpoints. Active-shift recovery uses Drive metadata first and only checks the current/previous month when repair is needed. Spreadsheet schema migrations read all month ranges through one Sheets `batchGet` request instead of issuing a separate read per tab.
+
+## Persistent Google connection
+The Google refresh token is kept only inside an encrypted HttpOnly cookie and is used server-side to refresh short-lived access tokens automatically. The encrypted session cookie is valid for up to one year unless the user explicitly disconnects/revokes access. Note that Google OAuth projects left in **Testing** can still expire refresh tokens after a short testing period; move the OAuth app to Production for long-lived personal use once testing is complete.

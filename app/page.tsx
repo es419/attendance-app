@@ -614,12 +614,36 @@ export default function Page() {
     }
     setPendingAction(pending);
     try {
-      await api(eventEndpoint(event), {
+      const data = await api<{ entry: AttendanceEntry }>(eventEndpoint(event), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(eventBody(event)),
       });
-      await refreshCurrent();
+
+      // The mutation endpoint already returns the authoritative row. Apply it
+      // locally instead of immediately re-reading the same Sheet twice (entries +
+      // active shift). This makes quick clock-in feel instant and dramatically
+      // reduces Sheets read-quota usage.
+      const confirmed = data.entry;
+      const entryYear = confirmed.year || event.year || viewYear;
+      const entryMonth = confirmed.month || event.month || viewMonth;
+      const key = cacheKey(event.workspaceId, entryYear, entryMonth);
+      const cached = readJson<AttendanceEntry[]>(key, []);
+      const without = cached.filter((item) => item.id !== confirmed.id);
+      const updated = [confirmed, ...without];
+      window.localStorage.setItem(key, JSON.stringify(updated));
+      if (entryYear === viewYear && entryMonth === viewMonth) setEntries(updated);
+
+      if (event.type !== "manual") {
+        const activeKey = activeCacheKey(event.workspaceId);
+        if (confirmed.clockOut) {
+          setActiveShift(null);
+          window.localStorage.removeItem(activeKey);
+        } else {
+          setActiveShift(confirmed);
+          window.localStorage.setItem(activeKey, JSON.stringify(confirmed));
+        }
+      }
       setMessage(success);
     } catch (error) {
       if (error instanceof ApiRequestError && error.network) enqueueAndApply(event);

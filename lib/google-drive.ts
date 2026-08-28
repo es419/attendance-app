@@ -586,6 +586,14 @@ async function getValues(spreadsheetId: string, a1: string) {
   );
 }
 
+async function batchGetValues(spreadsheetId: string, ranges: string[]) {
+  const query = new URLSearchParams({ majorDimension: "ROWS" });
+  for (const range of ranges) query.append("ranges", range);
+  return googleJson<{ valueRanges?: Array<{ range?: string; values?: string[][] }> }>(
+    `${SHEETS_API}/spreadsheets/${encodeURIComponent(spreadsheetId)}/values:batchGet?${query.toString()}`
+  );
+}
+
 async function updateValues(spreadsheetId: string, range: string, values: unknown[][]) {
   return googleJson(`${SHEETS_API}/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`, {
     method: "PUT",
@@ -684,16 +692,32 @@ async function initializeAttendanceSpreadsheet(spreadsheetId: string, isNew: boo
     }
   }
 
-  const visualRequests: Record<string, unknown>[] = [];
+  // Resolve all month tabs from the metadata snapshot and read every month in one
+  // Sheets batchGet request. Schema migrations used to issue 12+ individual reads,
+  // which could exhaust the per-user Sheets read quota during a normal clock-in.
+  const monthSheets: Array<{ month: number; sheetName: string; sheetId: number }> = [];
   for (let month = 1; month <= 12; month++) {
-    const sheetName = await resolveMonthSheet(spreadsheetId, month, false);
-    if (!sheetName) continue;
+    const marker = (metadata.developerMetadata || []).find(
+      (item) => item.metadataKey === "attendanceMonth" && Number(item.metadataValue) === month && item.location?.sheetId
+    );
+    let sheet = marker?.location?.sheetId
+      ? metadata.sheets?.find((item) => item.properties.sheetId === marker.location!.sheetId)
+      : undefined;
+    if (!sheet) sheet = metadata.sheets?.find((item) => item.properties.title === MONTHS_HE[month - 1]);
+    if (sheet) monthSheets.push({ month, sheetName: sheet.properties.title, sheetId: sheet.properties.sheetId });
+  }
+
+  const migrationRanges = monthSheets.map(({ sheetName }) => `'${sheetName.replace(/'/g, "''")}'!A2:P2000`);
+  const migrationRead = migrationRanges.length ? await batchGetValues(spreadsheetId, migrationRanges) : { valueRanges: [] };
+  const valueWrites: Array<{ range: string; values: unknown[][] }> = [];
+  const visualRequests: Record<string, unknown>[] = [];
+
+  monthSheets.forEach(({ sheetName, sheetId }, index) => {
     const safeSheetName = sheetName.replace(/'/g, "''");
-    await updateValues(spreadsheetId, `'${safeSheetName}'!A1:P1`, [HEADERS]);
+    valueWrites.push({ range: `'${safeSheetName}'!A1:P1`, values: [HEADERS] });
 
     // Migrate older rows without touching the original app data columns A:M.
-    const existing = await getValues(spreadsheetId, `'${safeSheetName}'!A2:P2000`);
-    const rows = existing.values || [];
+    const rows = migrationRead.valueRanges?.[index]?.values || [];
     if (rows.length) {
       const humanBreakColumns = rows.map((row) => {
         const parsedBreaks = parseBreaks(row[9]);
@@ -704,12 +728,9 @@ async function initializeAttendanceSpreadsheet(spreadsheetId: string, isNew: boo
           breakAllowanceMinutes,
         ];
       });
-      await updateValues(spreadsheetId, `'${safeSheetName}'!N2:P${rows.length + 1}`, humanBreakColumns);
+      valueWrites.push({ range: `'${safeSheetName}'!N2:P${rows.length + 1}`, values: humanBreakColumns });
     }
 
-    const sheet = metadata.sheets?.find((item) => item.properties.title === sheetName);
-    if (!sheet) continue;
-    const sheetId = sheet.properties.sheetId;
     visualRequests.push(
       {
         updateSheetProperties: {
@@ -755,7 +776,8 @@ async function initializeAttendanceSpreadsheet(spreadsheetId: string, isNew: boo
       { updateDimensionProperties: { range: { sheetId, dimension: "COLUMNS", startIndex: 13, endIndex: 14 }, properties: { pixelSize: 220 }, fields: "pixelSize" } },
       { updateDimensionProperties: { range: { sheetId, dimension: "COLUMNS", startIndex: 14, endIndex: 16 }, properties: { pixelSize: 105 }, fields: "pixelSize" } }
     );
-  }
+  });
+  if (valueWrites.length) await batchUpdateValues(spreadsheetId, valueWrites);
   if (visualRequests.length) await sheetsBatchUpdate(spreadsheetId, visualRequests);
 }
 
@@ -1023,12 +1045,17 @@ export async function getActiveAttendanceEntry(workspaceId: string) {
   const year = Number(props.activeEntryYear || 0);
   const month = Number(props.activeEntryMonth || 0);
 
+  // Normal path: the workspace metadata points straight to the active row, so one
+  // month read is enough and the shift survives app closes/reopens.
   if (entryId && Number.isInteger(year) && Number.isInteger(month) && month >= 1 && month <= 12) {
     const exact = await findEntryInMonth(workspaceId, entryId, year, month, false);
     if (exact?.entry && !exact.entry.clockOut) return exact.entry;
+    await setActiveShiftMetadata(workspaceId, null);
   }
 
-  const open = await findOpenEntryGlobal(workspaceId);
+  // Recovery path: only inspect the current/previous month. A full historical scan
+  // on every foreground refresh was too expensive for the Sheets per-user quota.
+  const open = await findOpenEntry(workspaceId);
   if (open?.entry) {
     await setActiveShiftMetadata(workspaceId, {
       entryId: open.entry.id,
@@ -1038,8 +1065,6 @@ export async function getActiveAttendanceEntry(workspaceId: string) {
     });
     return open.entry;
   }
-
-  if (entryId) await setActiveShiftMetadata(workspaceId, null);
   return null;
 }
 
@@ -1065,19 +1090,38 @@ export async function clockIn(
   const local = israelNow(at);
   const id = options.entryId || randomUUID();
 
-  if (options.entryId) {
-    const duplicate = await findEntryInMonth(workspaceId, id, local.year, local.month, false);
-    if (duplicate) {
-      if (!duplicate.entry.clockOut) await setActiveShiftMetadata(workspaceId, { entryId: id, year: local.year, month: local.month, startedAt: duplicate.entry.clockInIso || at.toISOString() });
-      return duplicate.entry;
+  // First trust the active-shift pointer stored on the Drive workspace. This is the
+  // normal case and avoids scanning every historical month just to clock in.
+  const props = workspace.appProperties || {};
+  const activeEntryId = props.activeEntryId || "";
+  const activeYear = Number(props.activeEntryYear || 0);
+  const activeMonth = Number(props.activeEntryMonth || 0);
+  if (activeEntryId && activeYear && activeMonth) {
+    const active = await findEntryInMonth(workspaceId, activeEntryId, activeYear, activeMonth, false);
+    if (active?.entry && !active.entry.clockOut) throw new Error("כבר קיימת כניסה פתוחה");
+    await setActiveShiftMetadata(workspaceId, null);
+  }
+
+  // Read the current month once: it provides idempotency for an Offline retry and
+  // also catches an open row that was created/edited manually in Sheets.
+  const currentMonth = await readMonthRows(workspaceId, local.year, local.month, false);
+  if (currentMonth) {
+    if (options.entryId) {
+      const duplicate = currentMonth.rows.find((item) => item.entry.id === id);
+      if (duplicate) {
+        if (!duplicate.entry.clockOut) await setActiveShiftMetadata(workspaceId, { entryId: id, year: local.year, month: local.month, startedAt: duplicate.entry.clockInIso || at.toISOString() });
+        return duplicate.entry;
+      }
+    }
+    const open = [...currentMonth.rows].reverse().find((item) => item.entry.id && !item.entry.clockOut && item.entry.clockInIso);
+    if (open) {
+      await setActiveShiftMetadata(workspaceId, { entryId: open.entry.id, year: local.year, month: local.month, startedAt: open.entry.clockInIso || at.toISOString() });
+      throw new Error("כבר קיימת כניסה פתוחה");
     }
   }
 
-  const existing = await findOpenEntryGlobal(workspaceId, at);
-  if (existing) throw new Error("כבר קיימת כניסה פתוחה");
-
-  const spreadsheetId = await ensureYearSpreadsheet(workspaceId, local.year);
-  const sheetName = await resolveMonthSheet(spreadsheetId, local.month, true);
+  const spreadsheetId = currentMonth?.spreadsheetId || await ensureYearSpreadsheet(workspaceId, local.year);
+  const sheetName = currentMonth?.sheetName || await resolveMonthSheet(spreadsheetId, local.month, true);
   if (!sheetName) throw new Error("לא ניתן לאתר את גיליון החודש");
   const row = [
     id, local.dateDisplay, local.weekday, local.timeDisplay, "", 0, "", at.toISOString(), "", "[]", 0, 0, "quick",
