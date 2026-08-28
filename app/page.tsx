@@ -870,12 +870,15 @@ export default function Page() {
       await fetch("/api/auth/logout", { method: "POST" });
       setStatus({ configured: true, connected: false, mode: "disconnected" });
       setDrawerOpen(false);
-      setMessage("התנתקת מ-Google Drive. הנתונים האחרונים נשמרו מקומית לקריאה ופעולות נוכחות יכולות להמתין לסנכרון.");
+      setTab("home");
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      setMessage("התנתקת מ-Google Drive. התחבר מחדש כדי להמשיך לעבוד מול Drive.");
     } finally { setPendingAction(null); }
   }
 
   const connected = Boolean(status?.connected);
   const configured = Boolean(status?.configured);
+  const disconnectedOnline = Boolean(status && configured && !connected && online);
   const hasWorkspace = Boolean(selectedFile);
   const syncText = queue.length
     ? `${queue.length} פעולות ממתינות לסנכרון`
@@ -898,10 +901,10 @@ export default function Page() {
 
         {tab === "home" && (
           <div className="screen-content home-screen">
-            <div className="date-clock">
+            {!disconnectedOnline && <div className="date-clock">
               <p>{now.toLocaleDateString("he-IL", { timeZone: "Asia/Jerusalem", weekday: "long", day: "numeric", month: "long" })}</p>
               <strong>{now.toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem", hour: "2-digit", minute: "2-digit", hour12: false })}</strong>
-            </div>
+            </div>}
 
             {!status && <section className="panel center-panel"><div className="spinner"/><p>בודק חיבור ל-Google Drive…</p></section>}
 
@@ -909,8 +912,8 @@ export default function Page() {
               <section className="panel connect-panel"><div className="large-icon"><Icon name="drive" /></div><h2>צריך להגדיר Google OAuth</h2><p>הוסף את פרטי Google Cloud למשתני הסביבה והפעל מחדש.</p></section>
             )}
 
-            {status && configured && !connected && !files.length && online && (
-              <section className="panel connect-panel public-home-card">
+            {disconnectedOnline && (
+              <section className="panel connect-panel public-home-card disconnected-connect-card">
                 <img className="app-logo" src="/icon-192.png" alt="Attendance App" width={84} height={84} />
                 <div>
                   <p className="eyebrow">Attendance App</p>
@@ -923,11 +926,11 @@ export default function Page() {
               </section>
             )}
 
-            {(connected || files.length > 0) && !selectedFile && (
+            {connected && !selectedFile && (
               <section className="panel connect-panel"><div className="large-icon"><Icon name="files" /></div><h2>אין קובץ נוכחות זמין</h2><p>{connected ? "צור קובץ ראשון או סנכרן מחדש את Drive." : "התחבר מחדש ל-Drive כדי לשחזר את מבנה הקבצים."}</p>{connected && <button className="primary-link button-link" onClick={() => setCreateOpen(true)}>צור קובץ ראשון</button>}</section>
             )}
 
-            {hasWorkspace && (
+            {hasWorkspace && (connected || !online) && (
               <>
                 <div className="action-stack quick-actions">
                   {!activeEntry ? (
@@ -963,7 +966,7 @@ export default function Page() {
               </>
             )}
 
-            <div className={`sync-pill ${queue.length ? "sync-warning" : ""}`}><Icon name={!online ? "offline" : queue.length ? "sync" : "cloud"}/><span>{syncText}</span></div>
+            {!disconnectedOnline && <div className={`sync-pill ${queue.length ? "sync-warning" : ""}`}><Icon name={!online ? "offline" : queue.length ? "sync" : "cloud"}/><span>{syncText}</span></div>}
           </div>
         )}
 
@@ -988,14 +991,24 @@ export default function Page() {
                 const total = live ? creditedMinutes(gross, breaks, breakAllowanceMinutes) : entry.durationMinutes;
                 return (
                   <article className="record-card record-card-actions" key={entry.id}>
-                    <div className="record-date"><strong>{entry.date}</strong><span>{entry.weekday}</span>{entry.source === "manual" && <em>ידני</em>}</div>
-                    <div className="record-times"><span>{entry.clockIn}</span><i>→</i><span>{entry.clockOut || "פעיל"}</span></div>
-                    {(entry.breakMinutes || entry.breaks?.length) ? <div className="record-break"><Icon name="coffee" />{formatDuration(breaks)} הפסקות</div> : <div className="record-break muted-break">ללא הפסקה</div>}
-                    {entry.note && <div className="record-note">{entry.note}</div>}
-                    <strong className="record-total">{formatDuration(total)}</strong>
+                    <div className="record-main">
+                      <div className="record-date"><strong>{entry.date}</strong><span>{entry.weekday}</span><em>{entry.source === "manual" ? "ידני" : "מהיר"}</em></div>
+                      <div className="record-times" aria-label="שעות המשמרת"><span>{entry.clockIn}</span><i>→</i><span>{entry.clockOut || "פעיל"}</span></div>
+                    </div>
+                    <div className="record-metrics">
+                      <div><span>ברוטו</span><strong>{formatDuration(gross)}</strong></div>
+                      <div><span>הפסקה</span><strong>{formatDuration(breaks)}</strong></div>
+                      <div className={Math.max(0, breaks - breakAllowanceMinutes) > 0 ? "metric-warning" : ""}><span>חריגה</span><strong>{formatDuration(Math.max(0, breaks - breakAllowanceMinutes))}</strong></div>
+                      <div className="metric-primary"><span>לחיוב</span><strong>{formatDuration(total)}</strong></div>
+                    </div>
+                    <div className="record-break-details">
+                      <Icon name="coffee" />
+                      <div><span>פירוט הפסקות · כלל {breakAllowanceMinutes} דק׳</span><strong>{entry.breaks?.length ? entry.breaks.map((item) => `${item.start}–${item.end || "פעילה"}`).join(" · ") : breaks ? `${formatDuration(breaks)} (ידני)` : "ללא הפסקה"}</strong></div>
+                    </div>
+                    {entry.note && <div className="record-note"><span>הערה</span><strong>{entry.note}</strong></div>}
                     <div className="record-tools">
-                      <button aria-label="ערוך רשומה" onClick={() => openEditEntry(entry)}><Icon name="edit"/></button>
-                      <button aria-label="מחק רשומה" className="danger-icon" onClick={() => void deleteEntry(entry)}><Icon name="trash"/></button>
+                      <button aria-label="ערוך רשומה" title="ערוך רשומה" onClick={() => openEditEntry(entry)}><Icon name="edit"/></button>
+                      <button aria-label="מחק רשומה" title="מחק רשומה" className="danger-icon" onClick={() => void deleteEntry(entry)}><Icon name="trash"/></button>
                     </div>
                   </article>
                 );
@@ -1023,11 +1036,11 @@ export default function Page() {
         )}
       </section>
 
-      <nav className="bottom-nav" aria-label="ניווט ראשי">
+      {!disconnectedOnline && <nav className="bottom-nav" aria-label="ניווט ראשי">
         <button className={tab === "home" ? "selected" : ""} onClick={() => setTab("home")}><Icon name="home"/>בית</button>
         <button className={tab === "records" ? "selected" : ""} onClick={() => setTab("records")}><Icon name="records"/>רשומות</button>
         <button className={tab === "files" ? "selected" : ""} onClick={() => setTab("files")}><Icon name="files"/>קבצים</button>
-      </nav>
+      </nav>}
 
       {message && <div className="toast">{message}</div>}
 

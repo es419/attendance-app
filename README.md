@@ -155,3 +155,8 @@ The Google refresh token is kept only inside an encrypted HttpOnly cookie and is
 אין צורך ב-Authorized JavaScript origin בארכיטקטורת OAuth השרתית הנוכחית.
 
 > הערה: שימוש אישי או שימוש בידי מספר קטן של משתמשים מוכרים עשוי להיות פטור מ-verification מלא של Google. אם Google דורשת אימות בעלות על דומיין לצורך Brand Verification, דומיין `vercel.app` הוא דומיין משותף שאינו בבעלות המשתמש; במקרה כזה יש להישאר בחריג personal use/unverified או לעבור בעתיד לדומיין פרטי.
+
+## UI layout polish
+- Explicit Google Drive logout returns to a dedicated centered reconnect screen.
+- Attendance records use a single full-width row and expose gross time, break time, excess break time and credited time.
+- Bottom navigation is pinned to the viewport with a fixed safe-area-aware layout on iPhone and desktop.
