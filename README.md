@@ -186,3 +186,11 @@ The app now redirects Vercel deployment-specific hostnames to the canonical orig
 Attendance actions (clock in/out, break start/end, and manual shifts) are applied to the UI and persisted locally immediately. Google Drive/Sheets writes run in a durable FIFO queue in the background. The queue survives closing/reopening the app and retries after reconnecting. Server-confirmed rows replace optimistic cache rows as each queued action completes.
 
 On touch devices, pulling down from the top and releasing after the threshold triggers a full refresh. The branded app loader stays visible until queued writes have completed and the current Drive/Sheets state has been read back. The same branded loader remains in use for app startup and tab transitions.
+
+## Existing Drive files and current-location subfolders
+
+- From **קבצים → קובץ קיים**, the app can adopt an existing Google Sheets file that was created directly in Google Drive.
+- A truly empty spreadsheet is initialized immediately as the current year's attendance spreadsheet.
+- If the selected spreadsheet already contains values, the app first shows a destructive confirmation. Only after explicit confirmation are all existing tabs/data rebuilt into the attendance schema.
+- The selected spreadsheet keeps its Drive identity (file ID), is moved into a newly managed attendance workspace in the same Drive location, and becomes `נוכחות <year>`.
+- From a file's `…` menu, **צור תת־תיקייה במיקום הזה** creates a folder beside the active attendance workspace, inside the Drive folder that currently contains it.

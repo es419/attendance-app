@@ -37,6 +37,15 @@ export type AttendanceFile = {
   breakAllowanceMinutes?: number;
 };
 
+
+export type DriveSpreadsheetCandidate = {
+  id: string;
+  name: string;
+  parentId?: string;
+  modifiedTime?: string;
+  webViewLink?: string;
+};
+
 export type DriveFolder = {
   id: string;
   name: string;

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createAttendanceFolder, listAttendanceFolders, renameAttendanceFolder, trashAttendanceFolder } from "@/lib/google-drive";
+import { createAttendanceFolder, createSubfolderForWorkspace, listAttendanceFolders, renameAttendanceFolder, trashAttendanceFolder } from "@/lib/google-drive";
 
 export async function GET() {
   try {
@@ -12,6 +12,10 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     const body = await request.json();
+    if (body.workspaceId && body.name) {
+      const folder = await createSubfolderForWorkspace(String(body.workspaceId), String(body.name));
+      return NextResponse.json({ folder }, { status: 201 });
+    }
     if (!Array.isArray(body.path)) return NextResponse.json({ error: "חסר נתיב" }, { status: 400 });
     const folder = await createAttendanceFolder(body.path.map(String));
     return NextResponse.json({ folder }, { status: 201 });

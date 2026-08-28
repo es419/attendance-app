@@ -6,6 +6,7 @@ import type {
   AttendanceFile,
   CreateAttendanceFileInput,
   DriveFolder,
+  DriveSpreadsheetCandidate,
 } from "./types";
 
 export const driveConfigured = googleOAuthConfigured;
@@ -500,6 +501,25 @@ export async function createAttendanceFolder(pathParts: string[]) {
   return { id: target.parentId, path: target.path };
 }
 
+export async function createSubfolderForWorkspace(workspaceId: string, name: string) {
+  const workspace = await assertAttendanceWorkspace(workspaceId);
+  const cleanName = name.trim();
+  if (!cleanName) throw new Error("צריך לתת שם לתת־התיקייה");
+  if (cleanName.length > 100) throw new Error("שם התיקייה ארוך מדי");
+
+  const parentId = workspace.parents?.[0] || "root";
+  const folder = await ensureNamedFolder(parentId, cleanName);
+  const appRootId = await ensureRootFolder();
+  const resolvedParent = await resolveParentPath(parentId, appRootId);
+  return {
+    id: folder.id,
+    name: folder.name,
+    parentId,
+    path: [...resolvedParent.path, folder.name],
+    depth: resolvedParent.path.length + 1,
+  } satisfies DriveFolder;
+}
+
 
 export async function renameAttendanceFolder(folderId: string, name: string) {
   const cleanName = name.trim();
@@ -519,6 +539,129 @@ export async function trashAttendanceFolder(folderId: string) {
   const target = folders.find((folder) => folder.id === folderId);
   if (!target) throw new Error("התיקייה לא נמצאת תחת תיקיית הנוכחות");
   await patchDriveFile(folderId, { trashed: true });
+}
+
+export async function listAdoptableDriveSpreadsheets(): Promise<DriveSpreadsheetCandidate[]> {
+  const result = await driveList(`mimeType='${SHEET_MIME}' and trashed=false`, "modifiedTime desc");
+  return result.files
+    .filter((file) => file.appProperties?.attendanceApp !== "year")
+    .map((file) => ({
+      id: file.id,
+      name: file.name,
+      parentId: file.parents?.[0],
+      modifiedTime: file.modifiedTime,
+      webViewLink: file.webViewLink,
+    }));
+}
+
+async function spreadsheetHasUserData(spreadsheetId: string) {
+  const metadata = await sheetsMetadata(spreadsheetId);
+  const ranges = (metadata.sheets || []).map((sheet) => `'${sheet.properties.title.replace(/'/g, "''")}'`);
+  if (!ranges.length) return false;
+  const response = await batchGetValues(spreadsheetId, ranges);
+  return (response.valueRanges || []).some((item) =>
+    (item.values || []).some((row) => row.some((cell) => String(cell ?? "").trim() !== ""))
+  );
+}
+
+async function resetSpreadsheetForAttendance(spreadsheetId: string) {
+  const metadata = await sheetsMetadata(spreadsheetId);
+  const existingSheets = metadata.sheets || [];
+  if (!existingSheets.length) throw new Error("לא נמצאו גיליונות בקובץ Google Sheets");
+
+  const tempTitle = `__attendance_reset_${randomUUID().slice(0, 8)}`;
+  await sheetsBatchUpdate(spreadsheetId, [
+    { addSheet: { properties: { title: tempTitle, rightToLeft: true, gridProperties: { frozenRowCount: 1 } } } },
+    ...existingSheets.map((sheet) => ({ deleteSheet: { sheetId: sheet.properties.sheetId } })),
+  ]);
+
+  const refreshed = await sheetsMetadata(spreadsheetId);
+  const blank = refreshed.sheets?.find((sheet) => sheet.properties.title === tempTitle);
+  if (!blank) throw new Error("לא ניתן לאתחל את קובץ Google Sheets");
+  await sheetsBatchUpdate(spreadsheetId, [
+    {
+      updateSheetProperties: {
+        properties: { sheetId: blank.properties.sheetId, title: "Sheet1", rightToLeft: true, gridProperties: { frozenRowCount: 1 } },
+        fields: "title,rightToLeft,gridProperties.frozenRowCount",
+      },
+    },
+  ]);
+}
+
+function workspaceNameFromSpreadsheet(name: string) {
+  const trimmed = name.trim();
+  const withoutCanonicalYear = trimmed.replace(/^נוכחות\s+20\d{2}$/u, "נוכחות").trim();
+  return (withoutCanonicalYear || "נוכחות").slice(0, 100);
+}
+
+export async function adoptDriveSpreadsheet(
+  spreadsheetId: string,
+  options: { confirmOverwrite?: boolean; workspaceName?: string } = {}
+): Promise<{ requiresConfirmation: boolean; file?: AttendanceFile; spreadsheetName: string }> {
+  const sheetFile = await getDriveFile(spreadsheetId);
+  if (sheetFile.trashed || sheetFile.mimeType !== SHEET_MIME) throw new Error("הקובץ שנבחר אינו Google Sheets זמין");
+  if (sheetFile.appProperties?.attendanceApp === "year") throw new Error("הקובץ כבר מנוהל על ידי אפליקציית הנוכחות");
+
+  const hasData = await spreadsheetHasUserData(spreadsheetId);
+  if (hasData && !options.confirmOverwrite) {
+    return { requiresConfirmation: true, spreadsheetName: sheetFile.name };
+  }
+
+  const now = israelNow();
+  const originalParents = sheetFile.parents || [];
+  const targetParentId = originalParents[0] || "root";
+  const workspaceKey = randomUUID();
+  const workspaceName = (options.workspaceName?.trim() || workspaceNameFromSpreadsheet(sheetFile.name)).slice(0, 100);
+  if (!workspaceName) throw new Error("לא ניתן לקבוע שם לקובץ הנוכחות");
+
+  const workspace = await createDriveFile({
+    name: workspaceName,
+    mimeType: FOLDER_MIME,
+    parents: [targetParentId],
+    appProperties: managedProps("workspace", {
+      workspaceKey,
+      breakAllowanceMinutes: String(DEFAULT_BREAK_ALLOWANCE_MINUTES),
+    }),
+  });
+
+  try {
+    await resetSpreadsheetForAttendance(spreadsheetId);
+    const yearProps = managedProps("year", {
+      attendanceYear: String(now.year),
+      attendanceWorkspaceId: workspace.id,
+      workspaceKey,
+    });
+    const moveParams: Record<string, string> = { addParents: workspace.id };
+    if (originalParents.length) moveParams.removeParents = originalParents.join(",");
+    await patchDriveFile(
+      spreadsheetId,
+      { name: `נוכחות ${now.year}`, appProperties: { ...(sheetFile.appProperties || {}), ...yearProps } },
+      moveParams
+    );
+    await initializeAttendanceSpreadsheet(spreadsheetId, true);
+  } catch (error) {
+    try { await patchDriveFile(workspace.id, { trashed: true }); } catch { /* best effort cleanup */ }
+    throw error;
+  }
+
+  const appRootId = await ensureRootFolder();
+  const resolved = await resolveParentPath(targetParentId, appRootId);
+  return {
+    requiresConfirmation: false,
+    spreadsheetName: sheetFile.name,
+    file: {
+      id: workspace.id,
+      name: workspace.name,
+      workspaceKey,
+      folderPath: resolved.path,
+      parentId: targetParentId,
+      insideRoot: resolved.insideRoot,
+      createdTime: workspace.createdTime,
+      modifiedTime: workspace.modifiedTime,
+      webViewLink: workspace.webViewLink,
+      breakAllowanceMinutes: DEFAULT_BREAK_ALLOWANCE_MINUTES,
+    },
+  };
 }
 
 async function findYearSpreadsheet(workspaceId: string, year: number) {

@@ -7,6 +7,7 @@ import type {
   AttendanceEntry,
   AttendanceFile,
   DriveFolder,
+  DriveSpreadsheetCandidate,
   DriveStatus,
   OfflineAttendanceEvent,
 } from "@/lib/types";
@@ -29,6 +30,7 @@ type PendingAction =
   | "logout"
   | "sync"
   | "settings"
+  | "adopt"
   | null;
 
 const pad = (n: number) => String(n).padStart(2, "0");
@@ -415,6 +417,12 @@ export default function Page() {
   const [pathValue, setPathValue] = useState("");
   const [folderManagerOpen, setFolderManagerOpen] = useState(false);
   const [newFolderPath, setNewFolderPath] = useState("");
+  const [currentFolderSubfolderOpen, setCurrentFolderSubfolderOpen] = useState(false);
+  const [currentFolderSubfolderName, setCurrentFolderSubfolderName] = useState("");
+  const [existingDriveOpen, setExistingDriveOpen] = useState(false);
+  const [driveCandidates, setDriveCandidates] = useState<DriveSpreadsheetCandidate[]>([]);
+  const [loadingDriveCandidates, setLoadingDriveCandidates] = useState(false);
+  const [overwriteCandidate, setOverwriteCandidate] = useState<DriveSpreadsheetCandidate | null>(null);
 
   useEffect(() => {
     setOnline(navigator.onLine);
@@ -1053,6 +1061,70 @@ export default function Page() {
     finally { setPendingAction(null); }
   }
 
+  async function createSubfolderAtCurrentLocation() {
+    if (!selectedFileId || !currentFolderSubfolderName.trim() || !status?.connected || !online || pendingAction) return;
+    setPendingAction("folder");
+    try {
+      await api("/api/drive/folders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId: selectedFileId, name: currentFolderSubfolderName.trim() }),
+      });
+      const name = currentFolderSubfolderName.trim();
+      setCurrentFolderSubfolderName("");
+      setCurrentFolderSubfolderOpen(false);
+      setMenuFile(null);
+      await loadFolders();
+      setMessage(`התיקייה “${name}” נוצרה ליד קובץ הנוכחות הנוכחי`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "לא ניתן ליצור תת־תיקייה");
+    } finally {
+      setPendingAction(null);
+    }
+  }
+
+  async function openExistingDriveFiles() {
+    if (!status?.connected || !online || pendingAction) return;
+    setExistingDriveOpen(true);
+    setLoadingDriveCandidates(true);
+    try {
+      const data = await api<{ files: DriveSpreadsheetCandidate[] }>("/api/drive/spreadsheets");
+      setDriveCandidates(data.files);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "לא ניתן לקרוא קבצים מ-Google Drive");
+    } finally {
+      setLoadingDriveCandidates(false);
+    }
+  }
+
+  async function adoptExistingDriveFile(candidate: DriveSpreadsheetCandidate, confirmOverwrite = false) {
+    if (!status?.connected || !online || pendingAction) return;
+    setPendingAction("adopt");
+    try {
+      const data = await api<{ requiresConfirmation: boolean; file?: AttendanceFile; spreadsheetName: string }>("/api/drive/spreadsheets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: candidate.id, confirmOverwrite }),
+      });
+      if (data.requiresConfirmation) {
+        setOverwriteCandidate(candidate);
+        return;
+      }
+      if (!data.file) throw new Error("לא התקבל קובץ נוכחות חדש");
+      setOverwriteCandidate(null);
+      setExistingDriveOpen(false);
+      setDriveCandidates([]);
+      await loadFiles(true);
+      setSelectedFileId(data.file.id);
+      setTab("home");
+      setMessage("קובץ Google Sheets הותאם לאפליקציה ונבחר לעבודה");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "לא ניתן להשתמש בקובץ שנבחר");
+    } finally {
+      setPendingAction(null);
+    }
+  }
+
   async function renameFolder(folder: DriveFolder) {
     if (!status?.connected || !online || pendingAction) return;
     const name = window.prompt("שם חדש לתיקייה", folder.name)?.trim();
@@ -1266,7 +1338,7 @@ export default function Page() {
           <div className="screen-content">
             {connected && <div className="drive-account"><div className="drive-badge"><Icon name="drive"/></div><div><strong>{status?.name || "Google Drive"}</strong><span>{status?.email || "מחובר"}</span></div><button className="text-button" onClick={() => void syncNow()}>{loadingFiles ? "מסנכרן…" : "סנכרן"}</button></div>}
             {!connected && <section className="panel compact-connect"><div><strong>{online ? "Google Drive מנותק" : "מצב Offline"}</strong><span>הקבצים האחרונים נשארים זמינים מהמטמון. בהתחברות הבאה תתבצע התאמה מלאה מול Drive.</span></div>{online && configured && <a className="small-button connect-small" href="/api/auth/google">התחבר</a>}</section>}
-            <div className="section-heading"><div><p className="eyebrow">Drive-first</p><h2>קבצי נוכחות</h2></div><div className="heading-actions"><button className="small-button" disabled={!connected || !online} onClick={() => setFolderManagerOpen(true)}><Icon name="folder"/>תיקיות</button><button className="small-button" disabled={!connected || !online} onClick={() => setCreateOpen(true)}><Icon name="plus"/>חדש</button></div></div>
+            <div className="section-heading"><div><p className="eyebrow">Drive-first</p><h2>קבצי נוכחות</h2></div><div className="heading-actions"><button className="small-button" disabled={!connected || !online} onClick={() => void openExistingDriveFiles()}><Icon name="drive"/>קובץ קיים</button><button className="small-button" disabled={!connected || !online} onClick={() => setFolderManagerOpen(true)}><Icon name="folder"/>תיקיות</button><button className="small-button" disabled={!connected || !online} onClick={() => setCreateOpen(true)}><Icon name="plus"/>חדש</button></div></div>
             {files.length === 0 && !loadingFiles && <div className="empty-state">אין קבצי נוכחות במטמון/Drive.</div>}
             {files.map((file) => (
               <article className={`file-card ${selectedFileId === file.id ? "selected-file" : ""}`} key={file.id} onClick={() => { setSelectedFileId(file.id); setTab("home"); }}>
@@ -1299,7 +1371,13 @@ export default function Page() {
 
       {folderManagerOpen && <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setFolderManagerOpen(false)}><div className="modal-card folder-manager"><div className="modal-title"><div><p className="eyebrow">Google Drive</p><h2>ניהול תיקיות</h2></div><button className="icon-button compact" onClick={() => setFolderManagerOpen(false)}><Icon name="close"/></button></div><label className="field-label">צור נתיב חדש</label><div className="inline-create"><input className="text-input" value={newFolderPath} onChange={(e) => setNewFolderPath(e.target.value)} placeholder="עבודה / 2026 / פרויקט"/><button className="small-button" disabled={!newFolderPath.trim() || Boolean(pendingAction)} onClick={() => void createFolderPath()}><Icon name="plus"/>צור</button></div><div className="folder-list">{folders.length === 0 && <div className="empty-state">אין תיקיות משנה.</div>}{folders.map((folder) => <div className="folder-row" key={folder.id}><div><strong>{folder.name}</strong><span>{folder.path.join(" / ")}{folder.containsWorkspaces ? ` · ${folder.containsWorkspaces} קבצי נוכחות` : ""}</span></div><div className="folder-actions"><button className="icon-button compact" aria-label="שנה שם תיקייה" onClick={() => void renameFolder(folder)}><Icon name="edit"/></button><button className="icon-button compact danger-icon" aria-label="מחק תיקייה" onClick={() => void deleteFolder(folder)}><Icon name="trash"/></button></div></div>)}</div><p className="modal-note">מחיקת תיקייה מעבירה אותה לאשפה ב-Drive יחד עם התוכן שבתוכה. אפשר לשחזר מהאשפה של Google Drive.</p></div></div>}
 
-      {menuFile && <div className="modal-backdrop bottom-sheet-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setMenuFile(null)}><div className="bottom-sheet"><div className="sheet-grabber"/><div className="sheet-file-title"><strong>{menuFile.name}</strong><span>{(menuFile.folderPath || []).join(" / ") || "שורש האפליקציה"}</span></div>{menuFile.webViewLink && <a className="sheet-action" href={menuFile.webViewLink} target="_blank" rel="noreferrer"><Icon name="external"/>פתח ב-Google Drive</a>}<button className="sheet-action" onClick={() => void renameFile(menuFile)}><Icon name="edit"/>שנה שם</button><button className="sheet-action" onClick={() => openMove(menuFile)}><Icon name="move"/>שנה נתיב / העבר</button><button className="sheet-action danger" onClick={() => void deleteFile(menuFile)}><Icon name="trash"/>העבר לאשפה</button><button className="sheet-cancel" onClick={() => setMenuFile(null)}>ביטול</button></div></div>}
+      {menuFile && <div className="modal-backdrop bottom-sheet-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setMenuFile(null)}><div className="bottom-sheet"><div className="sheet-grabber"/><div className="sheet-file-title"><strong>{menuFile.name}</strong><span>{(menuFile.folderPath || []).join(" / ") || "שורש האפליקציה"}</span></div>{menuFile.webViewLink && <a className="sheet-action" href={menuFile.webViewLink} target="_blank" rel="noreferrer"><Icon name="external"/>פתח ב-Google Drive</a>}<button className="sheet-action" onClick={() => { setSelectedFileId(menuFile.id); setMenuFile(null); setCurrentFolderSubfolderOpen(true); }}><Icon name="folder"/>צור תת־תיקייה במיקום הזה</button><button className="sheet-action" onClick={() => void renameFile(menuFile)}><Icon name="edit"/>שנה שם</button><button className="sheet-action" onClick={() => openMove(menuFile)}><Icon name="move"/>שנה נתיב / העבר</button><button className="sheet-action danger" onClick={() => void deleteFile(menuFile)}><Icon name="trash"/>העבר לאשפה</button><button className="sheet-cancel" onClick={() => setMenuFile(null)}>ביטול</button></div></div>}
+
+      {currentFolderSubfolderOpen && selectedFile && <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setCurrentFolderSubfolderOpen(false)}><div className="modal-card"><div className="modal-title"><div><p className="eyebrow">מיקום נוכחי</p><h2>תת־תיקייה חדשה</h2></div><button className="icon-button compact" onClick={() => setCurrentFolderSubfolderOpen(false)}><Icon name="close"/></button></div><p className="modal-note">התיקייה תיווצר בתוך אותה תיקייה ב-Google Drive שבה נמצא כרגע “{selectedFile.name}”.</p><div className="drive-preview"><span>המיקום הנוכחי</span><strong>{(selectedFile.folderPath || []).join(" / ") || "שורש האפליקציה"}</strong></div><label className="field-label">שם תת־התיקייה</label><input className="text-input" value={currentFolderSubfolderName} onChange={(e) => setCurrentFolderSubfolderName(e.target.value)} placeholder="לדוגמה: מסמכים" autoFocus/><button className="primary-action modal-action" disabled={!currentFolderSubfolderName.trim() || Boolean(pendingAction)} onClick={() => void createSubfolderAtCurrentLocation()}>{pendingAction === "folder" ? "יוצר ב-Drive…" : "צור תת־תיקייה"}</button></div></div>}
+
+      {existingDriveOpen && <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && !overwriteCandidate && setExistingDriveOpen(false)}><div className="modal-card drive-file-picker"><div className="modal-title"><div><p className="eyebrow">Google Drive</p><h2>בחר קובץ קיים</h2></div><button className="icon-button compact" onClick={() => setExistingDriveOpen(false)}><Icon name="close"/></button></div><p className="modal-note">מוצגים קבצי Google Sheets שעדיין אינם מנוהלים על ידי האפליקציה. קובץ ריק יותאם מיד למבנה הנוכחות.</p><div className="existing-drive-list">{loadingDriveCandidates && <div className="empty-state">טוען קבצים מ-Drive…</div>}{!loadingDriveCandidates && driveCandidates.length === 0 && <div className="empty-state">לא נמצאו קבצי Google Sheets זמינים.</div>}{driveCandidates.map((candidate) => <button className="existing-drive-row" key={candidate.id} disabled={pendingAction === "adopt"} onClick={() => void adoptExistingDriveFile(candidate)}><span className="existing-drive-icon"><Icon name="drive"/></span><span className="existing-drive-copy"><strong>{candidate.name}</strong><small>{candidate.modifiedTime ? `עודכן ${new Date(candidate.modifiedTime).toLocaleDateString("he-IL")}` : "Google Sheets"}</small></span><Icon name="move"/></button>)}</div><p className="modal-note">האפליקציה תיצור עבור הקובץ תיק נוכחות מסודר באותו מיקום ב-Drive ותשתמש בקובץ כקובץ השנה הנוכחית.</p></div></div>}
+
+      {overwriteCandidate && <div className="modal-backdrop destructive-backdrop"><div className="modal-card destructive-confirm"><div className="danger-modal-icon"><Icon name="trash"/></div><h2>הקובץ מכיל נתונים</h2><p>הקובץ “{overwriteCandidate.name}” אינו ריק. אם תמשיך, <strong>כל הגיליונות וכל הנתונים הקיימים בו יימחקו</strong>, והקובץ ייבנה מחדש לפי מבנה אפליקציית הנוכחות.</p><div className="warning-box">הפעולה משנה את אותו קובץ ב-Google Drive. ודא שאין בו מידע שאתה צריך לפני ההמשך.</div><div className="confirm-actions"><button className="sheet-cancel" disabled={pendingAction === "adopt"} onClick={() => setOverwriteCandidate(null)}>ביטול</button><button className="danger-action" disabled={pendingAction === "adopt"} onClick={() => void adoptExistingDriveFile(overwriteCandidate, true)}>{pendingAction === "adopt" ? "מוחק ובונה מחדש…" : "מחק ובנה מחדש"}</button></div></div></div>}
 
       {drawerOpen && <div className="drawer-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setDrawerOpen(false)}><aside className="side-drawer"><div className="drawer-header"><div><p className="eyebrow">הגדרות</p><h2>אפליקציית נוכחות</h2></div><button className="icon-button compact" onClick={() => setDrawerOpen(false)}><Icon name="close"/></button></div><section className="drawer-section"><h3>מראה</h3><div className="theme-picker"><button className={theme === "system" ? "selected" : ""} onClick={() => setTheme("system")}><Icon name="system"/>מערכת</button><button className={theme === "light" ? "selected" : ""} onClick={() => setTheme("light")}><Icon name="sun"/>בהיר</button><button className={theme === "dark" ? "selected" : ""} onClick={() => setTheme("dark")}><Icon name="moon"/>חשוך</button></div></section>{selectedFile && <section className="drawer-section break-settings"><h3>כלל הפסקה · {selectedFile.name}</h3><p>כמה דקות הפסקה מותרות לפני שמתחיל ניכוי מהשעות. ההגדרה נשמרת ב-Drive של קובץ הנוכחות ומסתנכרנת בין מכשירים.</p><div className="break-presets">{[0, 20, 30, 40, 60].map((value) => <button key={value} className={Number(breakAllowanceInput) === value ? "selected" : ""} onClick={() => setBreakAllowanceInput(String(value))}>{value}</button>)}</div><div className="break-setting-row"><div className="minutes-input"><input type="number" min="0" max="600" inputMode="numeric" value={breakAllowanceInput} onChange={(e) => setBreakAllowanceInput(e.target.value)}/><span>דקות</span></div><button className="small-button" disabled={!connected || !online || pendingAction === "settings" || Number(breakAllowanceInput) === breakAllowanceMinutes} onClick={() => void saveBreakAllowance()}>{pendingAction === "settings" ? "שומר…" : "שמור"}</button></div><small>שינוי הכלל מחשב מחדש גם רשומות שכבר נסגרו כדי שהאפליקציה וה-Sheets יישארו עקביים.</small></section>}<section className="drawer-section sync-section"><h3>סנכרון</h3><div className="sync-summary"><Icon name={online ? "sync" : "offline"}/><div><strong>{syncText}</strong><span>Drive הוא מקור האמת. בהתחברות מחדש מתבצעת סריקה מלאה לפי metadata.</span></div></div>{queue.length > 0 && <><button className="small-button drawer-wide" disabled={!connected || !online || queueSyncing} onClick={() => void flushQueue()}><Icon name="sync"/>{queueSyncing ? "מסנכרן…" : `סנכרן ${queue.length} פעולות`}</button><button className="text-button danger-text" onClick={() => { if (confirm("למחוק את כל הפעולות שעדיין לא סונכרנו?")) saveQueue([]); }}>מחק פעולות ממתינות</button></>}</section>{connected ? <section className="drawer-section account-section"><h3>Google Drive</h3><div className="drawer-account"><div className="drive-badge"><Icon name="drive"/></div><div><strong>{status?.name || "Google"}</strong><span>{status?.email || "מחובר"}</span></div></div><button className="logout-button" disabled={pendingAction === "logout"} onClick={() => void disconnect()}><Icon name="logout"/>{pendingAction === "logout" ? "מתנתק…" : "התנתק מ-Google Drive"}</button></section> : configured && online ? <a className="primary-link" href="/api/auth/google">התחבר מחדש ל-Google Drive</a> : null}<div className="drawer-legal-links"><a href="/privacy">מדיניות פרטיות</a><a href="/terms">תנאי שימוש</a></div><p className="drawer-note">התנתקות מבטלת את הרשאת Google. המטמון המקומי נשאר לקריאה, ופעולות נוכחות יכולות להמתין עד לחיבור הבא. שינויים ידניים ב-Drive ייקלטו בסריקה המלאה לאחר ההתחברות.</p></aside></div>}
     </main>

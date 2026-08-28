@@ -1271,3 +1271,83 @@ h2 { margin: 0; font-size: 18px; letter-spacing: -.02em; }
   .pull-refresh-indicator,
   .pull-refresh-indicator img { transition: none !important; }
 }
+
+/* Existing Drive file adoption + create subfolder beside current workspace */
+.drive-file-picker { width: min(560px, 100%); }
+.existing-drive-list {
+  display: grid;
+  gap: 8px;
+  max-height: min(52dvh, 430px);
+  overflow-y: auto;
+  padding: 2px;
+  overscroll-behavior: contain;
+}
+.existing-drive-row {
+  width: 100%;
+  min-height: 58px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--surface-muted);
+  color: var(--text);
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) 22px;
+  gap: 10px;
+  align-items: center;
+  padding: 9px 11px;
+  text-align: right;
+  transition: transform .14s ease, border-color .14s ease, background .14s ease;
+}
+.existing-drive-row:active { transform: scale(.99); }
+.existing-drive-row:disabled { opacity: .55; }
+.existing-drive-row > svg { width: 18px; height: 18px; color: var(--muted); transform: rotate(180deg); }
+.existing-drive-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface-solid));
+  color: var(--accent);
+}
+.existing-drive-icon svg { width: 20px; height: 20px; }
+.existing-drive-copy { min-width: 0; display: grid; gap: 3px; }
+.existing-drive-copy strong,
+.existing-drive-copy small { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.existing-drive-copy strong { font-size: 14px; }
+.existing-drive-copy small { color: var(--muted); font-size: 10px; }
+.destructive-backdrop { z-index: 5200; }
+.destructive-confirm { width: min(430px, 100%); text-align: center; justify-items: center; }
+.destructive-confirm > p { margin: 0; color: var(--muted); line-height: 1.7; font-size: 13px; }
+.danger-modal-icon {
+  width: 52px;
+  height: 52px;
+  border-radius: 17px;
+  display: grid;
+  place-items: center;
+  color: var(--danger);
+  background: var(--danger-surface);
+  border: 1px solid color-mix(in srgb, var(--danger) 25%, var(--line));
+}
+.danger-modal-icon svg { width: 24px; height: 24px; }
+.warning-box {
+  width: 100%;
+  padding: 11px 12px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--danger-surface) 72%, var(--surface-muted));
+  color: var(--text);
+  border: 1px solid color-mix(in srgb, var(--danger) 18%, var(--line));
+  font-size: 11px;
+  line-height: 1.6;
+  text-align: right;
+}
+.confirm-actions { width: 100%; display: grid; grid-template-columns: 1fr 1.35fr; gap: 8px; }
+.confirm-actions .sheet-cancel,
+.confirm-actions .danger-action { min-height: 48px; border-radius: 14px; }
+
+@media (max-width: 760px) {
+  .drive-file-picker { max-height: calc(100dvh - 26px); }
+  .existing-drive-list { max-height: 48dvh; }
+  .existing-drive-row { min-height: 54px; grid-template-columns: 34px minmax(0, 1fr) 18px; padding: 8px 9px; border-radius: 14px; }
+  .existing-drive-icon { width: 34px; height: 34px; border-radius: 10px; }
+  .confirm-actions { grid-template-columns: 1fr; }
+}
