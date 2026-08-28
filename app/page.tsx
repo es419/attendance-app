@@ -38,6 +38,7 @@ const pad = (n: number) => String(n).padStart(2, "0");
 const DEFAULT_TARGET_HOURS = 120;
 const MONTHS_HE = ["ינואר", "פברואר", "מרץ", "אפריל", "מאי", "יוני", "יולי", "אוגוסט", "ספטמבר", "אוקטובר", "נובמבר", "דצמבר"];
 const QUEUE_KEY = "attendance:offlineQueue:v1";
+const FAILED_QUEUE_KEY = "attendance:failedQueue:v1";
 const FILES_CACHE_KEY = "attendance:filesCache:v1";
 const ENTRY_CACHE_PREFIX = "attendance:entriesCache:v1:";
 const ACTIVE_CACHE_PREFIX = "attendance:activeShift:v1:";
@@ -225,9 +226,11 @@ function HoldActionButton({
 
 class ApiRequestError extends Error {
   network: boolean;
-  constructor(message: string, network = false) {
+  status: number;
+  constructor(message: string, network = false, status = 0) {
     super(message);
     this.network = network;
+    this.status = status;
   }
 }
 
@@ -249,7 +252,7 @@ async function api<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> 
       throw new ApiRequestError("אין כרגע חיבור לרשת", true);
     }
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new ApiRequestError(data.error || "משהו השתבש", false);
+    if (!response.ok) throw new ApiRequestError(data.error || "משהו השתבש", false, response.status);
     return data as T;
   })();
 
@@ -622,30 +625,58 @@ export default function Page() {
     const worker = (async () => {
       setQueueSyncing(true);
       let synced = 0;
+      let rejected = 0;
       try {
         while (navigator.onLine && status?.connected) {
           const current = readJson<OfflineAttendanceEvent[]>(QUEUE_KEY, []);
           if (!current.length) break;
           const event = current[0];
-          const data = await api<{ entry: AttendanceEntry }>(eventEndpoint(event), {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(eventBody(event)),
-          });
-          applyConfirmedEntry(data.entry, event);
+          try {
+            const data = await api<{ entry: AttendanceEntry }>(eventEndpoint(event), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(eventBody(event)),
+            });
+            applyConfirmedEntry(data.entry, event);
 
-          // Remove only the event that just succeeded from the *latest* queue.
-          // New button presses may have been appended while this request was in flight.
-          const latest = readJson<OfflineAttendanceEvent[]>(QUEUE_KEY, []);
-          saveQueue(latest.filter((item) => item.id !== event.id));
-          synced++;
+            // Remove only the event that just succeeded from the *latest* queue.
+            // New button presses may have been appended while this request was in flight.
+            const latest = readJson<OfflineAttendanceEvent[]>(QUEUE_KEY, []);
+            saveQueue(latest.filter((item) => item.id !== event.id));
+            synced++;
+          } catch (error) {
+            if (error instanceof ApiRequestError && error.network) throw error;
+
+            // A 4xx response is a permanent validation/conflict failure. Keeping it
+            // at the head of a FIFO queue would block every newer clock action forever.
+            // Move it aside, preserve it locally for recovery/debugging, and continue.
+            if (error instanceof ApiRequestError && error.status >= 400 && error.status < 500) {
+              const failed = readJson<Array<{ event: OfflineAttendanceEvent; reason: string; failedAt: string }>>(FAILED_QUEUE_KEY, []);
+              window.localStorage.setItem(FAILED_QUEUE_KEY, JSON.stringify([
+                ...failed,
+                { event, reason: error.message, failedAt: new Date().toISOString() },
+              ].slice(-50)));
+              const latest = readJson<OfflineAttendanceEvent[]>(QUEUE_KEY, []);
+              saveQueue(latest.filter((item) => item.id !== event.id));
+              rejected++;
+              continue;
+            }
+
+            throw error;
+          }
         }
-        if (synced) setMessage(`${synced} פעולות סונכרנו ברקע`);
+        if (rejected) {
+          setMessage(synced
+            ? `${synced} פעולות סונכרנו · ${rejected} פעולה ישנה לא הייתה תקינה והועברה הצידה`
+            : `${rejected} פעולה ישנה לא הייתה תקינה והועברה הצידה`);
+        } else if (synced) {
+          setMessage(`${synced} פעולות סונכרנו ברקע`);
+        }
       } catch (error) {
-        // The event stays in the persistent queue. A later foreground refresh or
-        // reconnect retries it in the same order, so closing the app loses nothing.
+        // Network/temporary server errors keep the event at the head of the queue
+        // so the app can retry later without losing the user's action.
         if (!(error instanceof ApiRequestError && error.network)) {
-          setMessage(error instanceof Error ? `פעולה ממתינה לסנכרון: ${error.message}` : "הסנכרון ינסה שוב בהמשך");
+          setMessage(error instanceof Error ? `הסנכרון ינסה שוב בהמשך: ${error.message}` : "הסנכרון ינסה שוב בהמשך");
         }
       } finally {
         setQueueSyncing(false);
