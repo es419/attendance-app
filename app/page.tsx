@@ -452,6 +452,7 @@ export default function Page() {
   const [newFolderPath, setNewFolderPath] = useState("");
   const [currentFolderSubfolderOpen, setCurrentFolderSubfolderOpen] = useState(false);
   const [currentFolderSubfolderName, setCurrentFolderSubfolderName] = useState("");
+  const [currentFolderAttendanceFileName, setCurrentFolderAttendanceFileName] = useState("נוכחות");
   const [existingDriveOpen, setExistingDriveOpen] = useState(false);
   const [driveCandidates, setDriveCandidates] = useState<DriveSpreadsheetCandidate[]>([]);
   const [loadingDriveCandidates, setLoadingDriveCandidates] = useState(false);
@@ -1311,22 +1312,39 @@ export default function Page() {
   }
 
   async function createSubfolderAtCurrentLocation() {
-    if (!selectedFileId || !currentFolderSubfolderName.trim() || !status?.connected || !online || pendingAction) return;
+    const folderName = currentFolderSubfolderName.trim();
+    const fileName = currentFolderAttendanceFileName.trim();
+    if (!selectedFileId || !folderName || !fileName || !status?.connected || !online || pendingAction) return;
     setPendingAction("folder");
     try {
       const data = await api<{ file: AttendanceFile }>("/api/drive/folders", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ workspaceId: selectedFileId, name: currentFolderSubfolderName.trim() }),
+        body: JSON.stringify({ workspaceId: selectedFileId, name: folderName, fileName }),
       });
-      const name = currentFolderSubfolderName.trim();
       setCurrentFolderSubfolderName("");
+      setCurrentFolderAttendanceFileName("נוכחות");
       setCurrentFolderSubfolderOpen(false);
       setMenuFile(null);
-      await Promise.all([loadFiles(true), loadFolders()]);
+
+      // The API already returns the new managed workspace. Show it immediately
+      // instead of waiting for Drive search indexing/reconciliation.
+      setFiles((current) => {
+        const next = [data.file, ...current.filter((file) => file.id !== data.file.id)];
+        window.localStorage.setItem(FILES_CACHE_KEY, JSON.stringify(next));
+        return next;
+      });
+      window.localStorage.setItem("attendance:selectedWorkspace", data.file.id);
+      filesFetchedAtRef.current = Date.now();
       setSelectedFileId(data.file.id);
+      setEntries([]);
+      setActiveShift(null);
       setTab("home");
-      notify(`התיקייה “${name}” נוצרה ליד התיק הנוכחי, ובתוכה נוצר קובץ נוכחות ${new Date().getFullYear()}`);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+
+      // Reconcile the folder list in the background; the user can already work.
+      void loadFolders();
+      notify(`נוצר תיק נוכחות חדש: “${data.file.name}” בתוך “${folderName}”`);
     } catch (error) {
       notify(error instanceof Error ? error.message : "לא ניתן ליצור תיקייה וקובץ נוכחות");
     } finally {
@@ -1717,7 +1735,7 @@ export default function Page() {
 
       {menuFile && <div className="modal-backdrop bottom-sheet-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setMenuFile(null)}><div className="bottom-sheet"><div className="sheet-grabber"/><div className="sheet-file-title"><strong>{menuFile.name}</strong><span>{menuFile.missingFromDrive ? "לא נמצא ב-Google Drive" : ((menuFile.folderPath || []).join(" / ") || "שורש האפליקציה")}</span></div>{menuFile.missingFromDrive ? <div className="missing-file-sheet-note">הקובץ נמחק או הועבר לאשפה ב-Drive. להסרה השתמש בכפתור “הסר” שמופיע על הרשומה.</div> : <>{menuFile.webViewLink && <a className="sheet-action" href={menuFile.webViewLink} target="_blank" rel="noreferrer"><Icon name="external"/>פתח ב-Google Drive</a>}<button className="sheet-action" onClick={() => { setSelectedFileId(menuFile.id); setMenuFile(null); setCurrentFolderSubfolderOpen(true); }}><Icon name="folder"/>צור תיקייה במיקום הזה</button><button className="sheet-action" onClick={() => void renameFile(menuFile)}><Icon name="edit"/>שנה שם</button><button className="sheet-action" onClick={() => openMove(menuFile)}><Icon name="move"/>שנה נתיב / העבר</button></>}<button className="sheet-cancel" onClick={() => setMenuFile(null)}>ביטול</button></div></div>}
 
-      {currentFolderSubfolderOpen && selectedFile && <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setCurrentFolderSubfolderOpen(false)}><div className="modal-card"><div className="modal-title"><div><p className="eyebrow">ליד התיק הנוכחי</p><h2>צור תיקייה חדשה</h2></div><button className="icon-button compact" onClick={() => setCurrentFolderSubfolderOpen(false)}><Icon name="close"/></button></div><p className="modal-note">התיקייה החדשה תיווצר ליד “{selectedFile.folderPath?.at(-1) || selectedFile.name}”, לא בתוכה. בתוך התיקייה החדשה ייווצר ישירות קובץ Google Sheets בשם “נוכחות {new Date().getFullYear()}”.</p><div className="drive-preview"><span>התיקייה שבה שתיהן יהיו</span><strong>{(selectedFile.folderPath || []).slice(0, -1).join(" / ") || "נוכחות בעבודה"}</strong><small>{(selectedFile.folderPath || []).slice(0, -1).join(" / ") || "נוכחות בעבודה"} / {currentFolderSubfolderName.trim() || "התיקייה החדשה"} / נוכחות {new Date().getFullYear()}</small></div><label className="field-label">שם התיקייה החדשה</label><input className="text-input" value={currentFolderSubfolderName} onChange={(e) => setCurrentFolderSubfolderName(e.target.value)} placeholder="לדוגמה: מס הכנסה חיפה" autoFocus/><button className="primary-action modal-action" disabled={!currentFolderSubfolderName.trim() || Boolean(pendingAction)} onClick={() => void createSubfolderAtCurrentLocation()}>{pendingAction === "folder" ? "יוצר ב-Drive…" : `צור תיקייה + נוכחות ${new Date().getFullYear()}`}</button></div></div>}
+      {currentFolderSubfolderOpen && selectedFile && <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setCurrentFolderSubfolderOpen(false)}><div className="modal-card"><div className="modal-title"><div><p className="eyebrow">תיק נוכחות חדש</p><h2>צור תיקייה במיקום הזה</h2></div><button className="icon-button compact" onClick={() => setCurrentFolderSubfolderOpen(false)}><Icon name="close"/></button></div><p className="modal-note">הפעולה יוצרת סביבת נוכחות חדשה, לא תיקייה ריקה: תיקייה חדשה ליד התיק הנוכחי, ובתוכה קובץ Google Sheets שנבחר על ידך. הקובץ החדש יופיע מיד בכרטיסיית קבצים וייבחר לעבודה.</p><label className="field-label">שם התיקייה החדשה</label><input className="text-input" value={currentFolderSubfolderName} onChange={(e) => setCurrentFolderSubfolderName(e.target.value)} placeholder="לדוגמה: מס הכנסה חיפה" autoFocus/><label className="field-label">שם קובץ הנוכחות <span className="optional-label">השנה תתווסף אוטומטית</span></label><input className="text-input" value={currentFolderAttendanceFileName} onChange={(e) => setCurrentFolderAttendanceFileName(e.target.value)} placeholder="לדוגמה: נוכחות מס הכנסה"/><div className="drive-preview"><span>המבנה שייווצר ב-Drive</span><strong>{(selectedFile.folderPath || []).slice(0, -1).join(" / ") || "האחסון שלי"}</strong><small>{(selectedFile.folderPath || []).slice(0, -1).join(" / ") || "האחסון שלי"} / {currentFolderSubfolderName.trim() || "התיקייה החדשה"} / {(currentFolderAttendanceFileName.trim() || "נוכחות").replace(/\s+20\d{2}$/, "")} {new Date().getFullYear()}</small></div><button className="primary-action modal-action" disabled={!currentFolderSubfolderName.trim() || !currentFolderAttendanceFileName.trim() || Boolean(pendingAction)} onClick={() => void createSubfolderAtCurrentLocation()}>{pendingAction === "folder" ? "יוצר ב-Drive…" : "צור תיק נוכחות חדש"}</button></div></div>}
 
       {existingDriveOpen && <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && !overwriteCandidate && setExistingDriveOpen(false)}><div className="modal-card drive-file-picker"><div className="modal-title"><div><p className="eyebrow">Google Drive</p><h2>בחר קובץ קיים</h2></div><button className="icon-button compact" onClick={() => setExistingDriveOpen(false)}><Icon name="close"/></button></div><p className="modal-note">מוצגים קבצי Google Sheets שעדיין אינם מנוהלים על ידי האפליקציה. קובץ ריק יישאר באותה תיקייה ויותאם למבנה הנוכחות בלי למחוק אותו.</p><div className="existing-drive-list">{loadingDriveCandidates && <div className="empty-state">טוען קבצים מ-Drive…</div>}{!loadingDriveCandidates && driveCandidates.length === 0 && <div className="empty-state">לא נמצאו קבצי Google Sheets זמינים.</div>}{driveCandidates.map((candidate) => <button className="existing-drive-row" key={candidate.id} disabled={pendingAction === "adopt"} onClick={() => void adoptExistingDriveFile(candidate)}><span className="existing-drive-icon"><Icon name="drive"/></span><span className="existing-drive-copy"><strong>{candidate.name}</strong><small>{candidate.modifiedTime ? `עודכן ${new Date(candidate.modifiedTime).toLocaleDateString("he-IL")}` : "Google Sheets"}</small></span><Icon name="move"/></button>)}</div><p className="modal-note">האפליקציה לא תיצור תיקיית עטיפה נוספת ולא תעביר קובץ שאינו חייב לעבור. הקובץ שבחרת עצמו ישמש כקובץ השנה הנוכחית.</p></div></div>}
 

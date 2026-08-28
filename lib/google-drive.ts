@@ -667,9 +667,22 @@ export async function createAttendanceFolder(pathParts: string[]) {
   return { id: target.parentId, path: target.path };
 }
 
-export async function createSiblingAttendanceWorkspace(workspaceId: string, name: string): Promise<AttendanceFile> {
+function normalizeYearFileBaseName(value: string) {
+  const clean = value.trim().replace(/\s+/g, " ").replace(/\s+20\d{2}$/, "").trim();
+  if (!clean) throw new Error("צריך לתת שם לקובץ הנוכחות");
+  if (clean.length > 90) throw new Error("שם קובץ הנוכחות ארוך מדי");
+  return clean;
+}
+
+function yearSpreadsheetName(workspace: DriveFile, year: number) {
+  const base = String(workspace.appProperties?.attendanceYearFileBaseName || "נוכחות").trim() || "נוכחות";
+  return `${base} ${year}`;
+}
+
+export async function createSiblingAttendanceWorkspace(workspaceId: string, name: string, fileName = "נוכחות"): Promise<AttendanceFile> {
   const workspace = await assertAttendanceWorkspace(workspaceId);
   const cleanName = name.trim();
+  const yearFileBaseName = normalizeYearFileBaseName(fileName);
   if (!cleanName) throw new Error("צריך לתת שם לתיקייה");
   if (cleanName.length > 100) throw new Error("שם התיקייה ארוך מדי");
 
@@ -705,7 +718,8 @@ export async function createSiblingAttendanceWorkspace(workspaceId: string, name
     appProperties: managedProps("folder", {
       workspaceKey,
       workspaceDisabled: "false",
-      workspaceDisplayName: cleanName,
+      workspaceDisplayName: yearFileBaseName,
+      attendanceYearFileBaseName: yearFileBaseName,
       breakAllowanceMinutes: String(DEFAULT_BREAK_ALLOWANCE_MINUTES),
       ...payroll.props,
     }),
@@ -726,7 +740,7 @@ export async function createSiblingAttendanceWorkspace(workspaceId: string, name
   const folderPath = [...resolvedParent.path, folder.name];
   return {
     id: folder.id,
-    name: cleanName,
+    name: yearFileBaseName,
     workspaceKey,
     folderPath,
     parentId: folder.id,
@@ -1248,7 +1262,7 @@ export async function ensureYearSpreadsheet(workspaceId: string, year: number) {
   }
 
   const created = await createDriveFile({
-    name: `נוכחות ${year}`,
+    name: yearSpreadsheetName(workspace, year),
     mimeType: SHEET_MIME,
     parents: [workspaceId],
     appProperties: managedProps("year", {

@@ -13,7 +13,11 @@ export async function POST(request: Request) {
   try {
     const body = await request.json();
     if (body.workspaceId && body.name) {
-      const file = await createSiblingAttendanceWorkspace(String(body.workspaceId), String(body.name));
+      const file = await createSiblingAttendanceWorkspace(
+        String(body.workspaceId),
+        String(body.name),
+        body.fileName ? String(body.fileName) : "נוכחות"
+      );
       return NextResponse.json({ file }, { status: 201 });
     }
     if (!Array.isArray(body.path)) return NextResponse.json({ error: "חסר נתיב" }, { status: 400 });
