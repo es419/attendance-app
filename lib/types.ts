@@ -5,13 +5,22 @@ export type AttendanceEntry = {
   clockIn: string;
   clockOut?: string;
   durationMinutes: number;
+  clockInIso?: string;
+  clockOutIso?: string;
 };
 
 export type AttendanceFile = {
   id: string;
   name: string;
-  year: number;
-  monthHours: number;
-  targetHours: number;
-  syncState: "synced" | "syncing" | "offline";
+  createdTime?: string;
+  modifiedTime?: string;
+  webViewLink?: string;
+};
+
+export type DriveStatus = {
+  configured: boolean;
+  connected: boolean;
+  mode: "not-configured" | "disconnected" | "google-drive";
+  email?: string;
+  name?: string;
 };
