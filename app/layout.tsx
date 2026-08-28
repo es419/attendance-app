@@ -2,10 +2,16 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { ServiceWorkerRegistration } from "@/components/service-worker-registration";
 
+const productionUrl = "https://attendance-app-blush-two.vercel.app";
+
 export const metadata: Metadata = {
-  title: "נוכחות בעבודה",
-  description: "אפליקציית נוכחות מסונכרנת עם Google Drive",
-  applicationName: "נוכחות",
+  metadataBase: new URL(productionUrl),
+  title: {
+    default: "Attendance App – נוכחות בעבודה",
+    template: "%s | Attendance App",
+  },
+  description: "אפליקציית נוכחות אישית לניהול כניסה, יציאה, הפסקות ומשמרות עם סנכרון Google Drive ו-Google Sheets.",
+  applicationName: "Attendance App",
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",
@@ -13,8 +19,19 @@ export const metadata: Metadata = {
   },
   formatDetection: { telephone: false },
   icons: {
-    icon: "/icon-192.png",
-    apple: "/icon-192.png",
+    icon: [
+      { url: "/favicon-64.png", sizes: "64x64", type: "image/png" },
+      { url: "/icon-192.png", sizes: "192x192", type: "image/png" },
+    ],
+    apple: [{ url: "/apple-touch-icon.png", sizes: "180x180", type: "image/png" }],
+  },
+  openGraph: {
+    title: "Attendance App – נוכחות בעבודה",
+    description: "ניהול נוכחות, משמרות והפסקות עם סנכרון Google Drive ו-Google Sheets.",
+    url: productionUrl,
+    siteName: "Attendance App",
+    type: "website",
+    images: [{ url: "/icon-512.png", width: 512, height: 512, alt: "Attendance App" }],
   },
 };
 

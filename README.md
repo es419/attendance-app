@@ -127,3 +127,31 @@ Quick attendance mutations now apply the authoritative row returned by the API d
 
 ## Persistent Google connection
 The Google refresh token is kept only inside an encrypted HttpOnly cookie and is used server-side to refresh short-lived access tokens automatically. The encrypted session cookie is valid for up to one year unless the user explicitly disconnects/revokes access. Note that Google OAuth projects left in **Testing** can still expire refresh tokens after a short testing period; move the OAuth app to Production for long-lived personal use once testing is complete.
+
+## Google OAuth — מעבר ל-Production (לשימוש אישי)
+
+הגרסה הזו כוללת את כל דפי ה-branding הציבוריים הדרושים:
+
+- Home: `https://attendance-app-blush-two.vercel.app/`
+- Privacy Policy: `https://attendance-app-blush-two.vercel.app/privacy`
+- Terms of Service: `https://attendance-app-blush-two.vercel.app/terms`
+- OAuth callback: `https://attendance-app-blush-two.vercel.app/api/auth/google/callback`
+- Logo upload: `public/icon-512.png`
+
+ב-Google Auth Platform > Branding יש למלא:
+
+- App name: `Attendance App`
+- User support email: כתובת האימייל של בעל האפליקציה
+- App logo: `public/icon-512.png`
+- Application home page: כתובת ה-Home שלמעלה
+- Application privacy policy link: כתובת ה-Privacy שלמעלה
+- Application terms of service link: כתובת ה-Terms שלמעלה
+- Developer contact information: כתובת האימייל של בעל האפליקציה
+
+ב-Google Auth Platform > Clients > Web application יש להשאיר את localhost לפיתוח ולהוסיף ל-Production:
+
+`https://attendance-app-blush-two.vercel.app/api/auth/google/callback`
+
+אין צורך ב-Authorized JavaScript origin בארכיטקטורת OAuth השרתית הנוכחית.
+
+> הערה: שימוש אישי או שימוש בידי מספר קטן של משתמשים מוכרים עשוי להיות פטור מ-verification מלא של Google. אם Google דורשת אימות בעלות על דומיין לצורך Brand Verification, דומיין `vercel.app` הוא דומיין משותף שאינו בבעלות המשתמש; במקרה כזה יש להישאר בחריג personal use/unverified או לעבור בעתיד לדומיין פרטי.
