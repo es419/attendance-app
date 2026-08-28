@@ -1477,3 +1477,115 @@ h2 { margin: 0; font-size: 18px; letter-spacing: -.02em; }
     min-height: 50px;
   }
 }
+
+/* Menu placement + lightweight motion polish */
+.topbar {
+  position: relative;
+}
+.topbar-copy {
+  min-width: 0;
+  text-align: right;
+}
+.menu-trigger {
+  flex: 0 0 auto;
+  transform-origin: center;
+  transition: transform .16s ease, background-color .16s ease, border-color .16s ease, color .16s ease, box-shadow .16s ease;
+}
+.menu-trigger:active { transform: scale(.92); }
+.menu-trigger[aria-expanded="true"] {
+  color: var(--text);
+  background: var(--surface-soft);
+  border-color: color-mix(in srgb, var(--text) 18%, var(--line));
+}
+
+.screen-content {
+  animation: screenEnter .24s cubic-bezier(.2,.8,.2,1) both;
+}
+.panel,
+.record-card,
+.file-card,
+.salary-card,
+.summary-target-card {
+  transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease, background-color .18s ease;
+}
+@media (hover: hover) {
+  .record-card:hover,
+  .file-card:hover {
+    transform: translateY(-1px);
+    border-color: color-mix(in srgb, var(--text) 12%, var(--line));
+    box-shadow: 0 10px 28px rgba(16,24,40,.055);
+  }
+}
+
+.icon-button,
+.small-button,
+.text-button,
+.primary-link,
+.sheet-action,
+.sheet-cancel,
+.logout-button,
+.bottom-nav button {
+  transition: transform .15s ease, opacity .15s ease, color .15s ease, background-color .15s ease, border-color .15s ease;
+}
+.icon-button:active,
+.small-button:active,
+.text-button:active,
+.primary-link:active,
+.sheet-action:active,
+.sheet-cancel:active,
+.logout-button:active { transform: scale(.97); }
+.bottom-nav button:active { transform: scale(.94); }
+.bottom-nav button.selected svg { animation: navIconIn .22s cubic-bezier(.2,.8,.2,1) both; }
+
+.drawer-backdrop { animation: overlayEnter .18s ease-out both; }
+.side-drawer {
+  transform-origin: top right;
+  animation: drawerEnterRight .28s cubic-bezier(.2,.82,.2,1) both;
+}
+.modal-backdrop { animation: overlayEnter .18s ease-out both; }
+.modal-card { animation: modalEnter .22s cubic-bezier(.2,.82,.2,1) both; }
+.bottom-sheet { animation: sheetEnter .24s cubic-bezier(.2,.82,.2,1) both; }
+.toast { animation: toastEnter .22s cubic-bezier(.2,.82,.2,1) both; }
+
+@keyframes screenEnter {
+  from { opacity: 0; transform: translateY(7px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes overlayEnter {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes drawerEnterRight {
+  from { opacity: .72; transform: translate3d(36px,0,0) scale(.988); }
+  to { opacity: 1; transform: translate3d(0,0,0) scale(1); }
+}
+@keyframes modalEnter {
+  from { opacity: 0; transform: translateY(9px) scale(.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes sheetEnter {
+  from { opacity: .55; transform: translateY(24px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes toastEnter {
+  from { opacity: 0; transform: translate(-50%, 9px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+@keyframes navIconIn {
+  0% { transform: scale(.82); }
+  70% { transform: scale(1.08); }
+  100% { transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .screen-content,
+  .drawer-backdrop,
+  .side-drawer,
+  .modal-backdrop,
+  .modal-card,
+  .bottom-sheet,
+  .toast,
+  .bottom-nav button.selected svg {
+    animation: none !important;
+  }
+}

@@ -200,3 +200,10 @@ On touch devices, pulling down from the top and releasing after the threshold tr
 The app now has a dedicated **Summary** tab. The monthly hours target moved out of Home and into Summary, alongside estimated gross and net pay. Per-workspace payroll settings are stored in Google Drive metadata and include hourly rate, target hours, employee pension percentage, employee training-fund percentage, combined National Insurance + health percentage, and up to eight fixed monthly additions.
 
 The net figure is intentionally an estimate: it subtracts the configured percentage deductions from estimated gross. Income tax is not calculated in this version.
+
+## UI polish update
+
+- The main menu trigger now sits on the right side of the header and the settings drawer enters from that same side.
+- Added lightweight motion for page changes, drawer/modal opening, navigation selection, toasts and tap feedback, with `prefers-reduced-motion` support.
+- Saving payroll or break settings closes the drawer immediately and returns to Home while the server save completes.
+- Payroll settings remain stored per attendance workspace in Google Drive. Custom monthly additions are already supported, and the payroll model can be extended later with additional payslip components without changing attendance records.

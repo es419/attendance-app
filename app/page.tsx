@@ -1215,6 +1215,9 @@ export default function Page() {
     const minutes = Math.max(0, Math.min(600, Math.floor(Number(breakAllowanceInput))));
     if (!Number.isFinite(minutes)) return setMessage("מספר הדקות לא תקין");
     setPendingAction("settings");
+    setDrawerOpen(false);
+    setTab("home");
+    window.scrollTo({ top: 0, behavior: "smooth" });
     try {
       await api(`/api/drive/files/${encodeURIComponent(selectedFileId)}`, {
         method: "PATCH",
@@ -1250,6 +1253,9 @@ export default function Page() {
         .slice(0, 8),
     };
     setPendingAction("settings");
+    setDrawerOpen(false);
+    setTab("home");
+    window.scrollTo({ top: 0, behavior: "smooth" });
     try {
       await api(`/api/drive/files/${encodeURIComponent(selectedFileId)}`, {
         method: "PATCH",
@@ -1313,11 +1319,11 @@ export default function Page() {
       )}
       <section className="app-card">
         <header className="topbar">
-          <div>
+          <button className="icon-button menu-trigger" aria-label="פתח תפריט" aria-expanded={drawerOpen} onClick={() => setDrawerOpen(true)}><Icon name="more" /></button>
+          <div className="topbar-copy">
             <p className="eyebrow">{selectedFile?.name || "נוכחות בעבודה"}</p>
             <h1>{tab === "home" ? "היום" : tab === "summary" ? "סיכום" : tab === "records" ? "רשומות" : "הקבצים שלי"}</h1>
           </div>
-          <button className="icon-button" aria-label="פתח תפריט" onClick={() => setDrawerOpen(true)}><Icon name="more" /></button>
         </header>
 
         {tab === "home" && (
