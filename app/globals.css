@@ -1732,3 +1732,100 @@ h2 { margin: 0; font-size: 18px; letter-spacing: -.02em; }
     padding-inline: 8px;
   }
 }
+
+/* Definitive iPhone-safe manual shift controls.
+   Native iOS date/time inputs are removed from layout and used only as an
+   invisible picker hit-target. This avoids WebKit's intrinsic date/time width
+   escaping RTL modals while keeping the native iOS picker. */
+.manual-modal {
+  inline-size: min(420px, calc(100vw - 28px));
+  max-inline-size: calc(100vw - 28px);
+  min-inline-size: 0;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+.manual-modal .manual-time-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  inline-size: 100%;
+  min-inline-size: 0;
+}
+.manual-modal .manual-time-row > div {
+  min-inline-size: 0;
+  inline-size: 100%;
+}
+.native-picker-shell {
+  position: relative;
+  display: flex;
+  align-items: center;
+  inline-size: 100%;
+  max-inline-size: 100%;
+  min-inline-size: 0;
+  block-size: 48px;
+  box-sizing: border-box;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-soft);
+  color: var(--text);
+  padding-inline: 12px;
+  direction: ltr;
+}
+.native-picker-value {
+  display: block;
+  inline-size: 100%;
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  font-size: 16px;
+  line-height: 1;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+.native-picker-value.placeholder {
+  color: var(--muted);
+  font-weight: 550;
+}
+.native-picker-shell > input[type="date"],
+.native-picker-shell > input[type="time"] {
+  position: absolute !important;
+  inset: 0 !important;
+  inline-size: 100% !important;
+  block-size: 100% !important;
+  min-inline-size: 0 !important;
+  max-inline-size: 100% !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  opacity: 0 !important;
+  cursor: pointer;
+  appearance: auto;
+  -webkit-appearance: auto;
+}
+
+@media (max-width: 430px) {
+  .modal-backdrop {
+    padding-inline: 14px;
+  }
+  .manual-modal {
+    inline-size: calc(100vw - 28px);
+    max-inline-size: calc(100vw - 28px);
+    padding: 15px;
+  }
+  .manual-modal .manual-time-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .native-picker-shell {
+    block-size: 47px;
+    padding-inline: 10px;
+    border-radius: 13px;
+  }
+  .native-picker-value {
+    font-size: 15px;
+  }
+}
