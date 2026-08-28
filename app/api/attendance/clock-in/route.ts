@@ -5,7 +5,10 @@ export async function POST(request: Request) {
   try {
     const body = await request.json();
     if (!body.workspaceId) return NextResponse.json({ error: "חסר קובץ נוכחות" }, { status: 400 });
-    const entry = await clockIn(String(body.workspaceId));
+    const entry = await clockIn(String(body.workspaceId), {
+      atIso: body.atIso ? String(body.atIso) : undefined,
+      entryId: body.entryId ? String(body.entryId) : undefined,
+    });
     return NextResponse.json({ entry }, { status: 201 });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "לא ניתן לבצע כניסה" }, { status: 400 });

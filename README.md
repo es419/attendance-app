@@ -1,6 +1,6 @@
 # Attendance App / אפליקציית נוכחות
 
-Mobile-first attendance PWA, optimized first for iPhone and responsive across desktop and Android.
+Mobile-first attendance PWA, optimized first for iPhone and responsive across Android, tablet and desktop.
 
 ## Stack
 - Next.js App Router + TypeScript
@@ -10,13 +10,65 @@ Mobile-first attendance PWA, optimized first for iPhone and responsive across de
 - Google Drive API as the source of truth
 - Google Sheets API for attendance rows
 
-## What is synchronized
-- Create a file in the app -> creates a real folder hierarchy in Google Drive: `נוכחות בעבודה / folder / optional subfolder / attendance file`.
-- Rename it in the app -> renames the same Drive folder.
-- Delete it in the app -> moves the same Drive folder to Google Drive Trash.
-- Rename, move, or delete the attendance workspace or its parent folders directly in Drive -> the app reflects the new path/state on focus and at most ~15 seconds later, as long as the workspace remains under `נוכחות בעבודה`.
-- First creation/first use creates `נוכחות YYYY` inside the workspace with 12 month tabs.
-- Clock-in/clock-out writes directly to the relevant Google Sheet. There is no second canonical database.
+## Drive-first reconciliation
+The app does not identify its data by filenames. App-created Drive objects receive stable metadata:
+- root folder: `attendanceApp=root`
+- attendance workspace: `attendanceApp=workspace` + a stable `workspaceKey`
+- yearly spreadsheet: `attendanceApp=year` + year + workspace identifiers
+- month tabs: Google Sheets developer metadata `attendanceMonth=1..12`
+
+On every reconnect and normal refresh, the app performs reconciliation against Drive. This means:
+- workspace rename -> detected
+- workspace move -> detected, even if moved outside the original app root
+- parent folder rename/move -> displayed path is rebuilt from Drive
+- workspace trash/restore -> disappears/reappears after sync
+- yearly spreadsheet rename/move -> still found from metadata
+- month tab rename -> still found from developer metadata
+- manual row edits in Sheets -> re-read on the next sync
+
+Google Drive / Sheets remain canonical. Local data is only a cache and an offline operation queue.
+
+## Offline mode
+The last known files and monthly records are cached locally per device.
+
+Clock-in, break start/end, clock-out and manual shifts can be queued while:
+- the network is unavailable, or
+- the Google account is disconnected.
+
+Each queued action has stable IDs so replay is idempotent. On reconnect the app:
+1. reconciles Drive structure,
+2. replays pending attendance actions in order,
+3. re-reads the active month from Sheets.
+
+If a queued action conflicts with a workspace that was deleted or changed incompatibly in Drive, synchronization stops and the pending action remains visible instead of silently discarding it.
+
+## Attendance
+- Quick clock-in / clock-out
+- Start break / return from break
+- Multiple breaks per shift
+- First 40 total break minutes are paid; only minutes above 40 are deducted
+- Clock-out while on break closes the break automatically
+- Manual shifts with date, start/end, break total and note
+- Overnight manual shifts supported
+- Edit every row from the app
+- Delete rows from the app
+- Browse months/years from the records screen
+
+## Files, folders and paths
+- Create attendance workspace under folder + optional subfolder
+- Rename workspace
+- Move workspace to any path under the app root; missing folders are created automatically
+- Trash workspace
+- Create nested folder paths
+- Rename folders
+- Trash folders
+- Direct Drive changes are picked up by reconciliation
+
+## Appearance and account
+- System / Light / Dark theme
+- iPhone safe-area support
+- Side settings drawer
+- Disconnect from Google Drive (revokes refresh token when possible)
 
 ## Run locally
 ```bash
@@ -25,54 +77,36 @@ npm run dev
 ```
 Open http://localhost:3000
 
-## Google Cloud setup
-1. Open Google Cloud Console and create/select a project.
-2. Enable **Google Drive API** and **Google Sheets API**.
-3. Configure the **OAuth consent screen**. For a personal/testing app, add your Google account as a test user.
-4. Create an OAuth Client ID of type **Web application**.
-5. Add this local redirect URI exactly:
-   `http://localhost:3000/api/auth/google/callback`
-6. Later, after Vercel deployment, also add:
-   `https://YOUR-VERCEL-DOMAIN/api/auth/google/callback`
-7. Copy `.env.example` to `.env.local` and fill in the values.
-
-Generate `AUTH_SECRET` with:
+Before pushing:
 ```bash
-node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+npm run build
 ```
 
-Example `.env.local`:
+## Google Cloud
+Enable:
+- Google Drive API
+- Google Sheets API
+
+OAuth scopes used by this project:
+- `openid`
+- `https://www.googleapis.com/auth/userinfo.email`
+- `https://www.googleapis.com/auth/userinfo.profile`
+- `https://www.googleapis.com/auth/drive`
+- `https://www.googleapis.com/auth/spreadsheets`
+
+Local redirect URI:
+`http://localhost:3000/api/auth/google/callback`
+
+Production redirect URI:
+`https://YOUR-VERCEL-DOMAIN/api/auth/google/callback`
+
+Environment variables:
 ```env
 GOOGLE_CLIENT_ID=...
 GOOGLE_CLIENT_SECRET=...
 AUTH_SECRET=...
-GOOGLE_REDIRECT_URI=http://localhost:3000/api/auth/google/callback
+GOOGLE_REDIRECT_URI=https://YOUR-VERCEL-DOMAIN/api/auth/google/callback
 GOOGLE_DRIVE_ROOT_FOLDER_ID=
 ```
 
-If `GOOGLE_DRIVE_ROOT_FOLDER_ID` is empty, the app finds or creates a root Drive folder named `נוכחות בעבודה`.
-
-After changing `.env.local`, stop the dev server with `Ctrl+C` and run `npm run dev` again.
-
-## Vercel
-Add the same environment variables under **Project -> Settings -> Environment Variables**.
-For production, set:
-```env
-GOOGLE_REDIRECT_URI=https://YOUR-VERCEL-DOMAIN/api/auth/google/callback
-```
-Then add exactly the same URI to the OAuth Client in Google Cloud.
-
-## Security
-- OAuth client secret and refresh token never go to client-side JavaScript.
-- Refresh token is stored in an encrypted, HttpOnly cookie using `AUTH_SECRET`.
-- API routes refresh short-lived Google access tokens server-side.
-- Drive operations are constrained to attendance workspaces anywhere inside the `נוכחות בעבודה` folder tree.
-
-## iPhone details
-- `viewport-fit=cover`
-- safe area insets for Dynamic Island / Home Indicator
-- `100dvh`
-- touch-sized controls
-- bottom navigation
-- standalone PWA metadata
-- live resync on app focus/return from background
+Never commit `.env.local` or OAuth client JSON files.
