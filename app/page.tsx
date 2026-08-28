@@ -386,6 +386,7 @@ export default function Page() {
   const [loadingEntries, setLoadingEntries] = useState(false);
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const messageTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [online, setOnline] = useState(true);
   const [queue, setQueue] = useState<OfflineAttendanceEvent[]>([]);
   const [bootLoading, setBootLoading] = useState(true);
@@ -399,6 +400,18 @@ export default function Page() {
   const didRenderTabRef = useRef(false);
   const queueFlushPromiseRef = useRef<Promise<void> | null>(null);
   const [queueSyncing, setQueueSyncing] = useState(false);
+  const notify = useCallback((text: string) => {
+    setMessage(text);
+    if (messageTimerRef.current) window.clearTimeout(messageTimerRef.current);
+    messageTimerRef.current = window.setTimeout(() => {
+      setMessage((current) => current === text ? null : current);
+      messageTimerRef.current = null;
+    }, 4200);
+  }, []);
+
+  useEffect(() => () => {
+    if (messageTimerRef.current) window.clearTimeout(messageTimerRef.current);
+  }, []);
   const refreshBusyRef = useRef(false);
   const shellRef = useRef<HTMLElement | null>(null);
   const pullStartYRef = useRef<number | null>(null);
@@ -532,7 +545,7 @@ export default function Page() {
     setTab("home");
     window.scrollTo({ top: 0, behavior: "smooth" });
     if (showMessage) {
-      setMessage("תיק הנוכחות לא נמצא ב-Google Drive. חזרת למסך הראשי; אפשר ליצור תיק חדש או להסיר את הרשומה המקומית ממסך הקבצים.");
+      notify("תיק הנוכחות לא נמצא ב-Google Drive. חזרת למסך הראשי; אפשר ליצור תיק חדש או להסיר את הרשומה המקומית ממסך הקבצים.");
     }
   }, []);
 
@@ -584,14 +597,14 @@ export default function Page() {
         setEntries([]);
         setActiveShift(null);
         setTab("home");
-        setMessage("תיק הנוכחות שנבחר כבר לא נמצא ב-Google Drive. אפשר ליצור תיק חדש או להסיר את הרשומה הישנה ממסך הקבצים.");
+        notify("תיק הנוכחות שנבחר כבר לא נמצא ב-Google Drive. אפשר ליצור תיק חדש או להסיר את הרשומה הישנה ממסך הקבצים.");
       } else if (saved && availableIds.has(saved)) {
         setSelectedFileId(saved);
       } else {
         setSelectedFileId((current) => current && availableIds.has(current) ? current : merged.find((file) => !file.missingFromDrive)?.id || null);
       }
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "לא ניתן לסנכרן את Drive");
+      notify(error instanceof Error ? error.message : "לא ניתן לסנכרן את Drive");
     } finally {
       setLoadingFiles(false);
     }
@@ -618,7 +631,7 @@ export default function Page() {
         return;
       }
       if (cached.length) setEntries(cached);
-      setMessage(error instanceof Error ? error.message : "לא ניתן לקרוא רשומות");
+      notify(error instanceof Error ? error.message : "לא ניתן לקרוא רשומות");
     } finally {
       setLoadingEntries(false);
     }
@@ -648,7 +661,7 @@ export default function Page() {
         return null;
       }
       setActiveShift(cached);
-      if (error instanceof Error) setMessage(error.message);
+      if (error instanceof Error) notify(error.message);
       return cached;
     }
   }, [activeCacheKey, markWorkspaceMissing, status?.connected]);
@@ -741,17 +754,17 @@ export default function Page() {
           }
         }
         if (rejected) {
-          setMessage(synced
+          notify(synced
             ? `${synced} פעולות סונכרנו · ${rejected} פעולה ישנה לא הייתה תקינה והועברה הצידה`
             : `${rejected} פעולה ישנה לא הייתה תקינה והועברה הצידה`);
         } else if (synced) {
-          setMessage(`${synced} פעולות סונכרנו ברקע`);
+          notify(`${synced} פעולות סונכרנו ברקע`);
         }
       } catch (error) {
         // Network/temporary server errors keep the event at the head of the queue
         // so the app can retry later without losing the user's action.
         if (!(error instanceof ApiRequestError && error.network)) {
-          setMessage(error instanceof Error ? `הסנכרון ינסה שוב בהמשך: ${error.message}` : "הסנכרון ינסה שוב בהמשך");
+          notify(error instanceof Error ? `הסנכרון ינסה שוב בהמשך: ${error.message}` : "הסנכרון ינסה שוב בהמשך");
         }
       } finally {
         setQueueSyncing(false);
@@ -861,12 +874,6 @@ export default function Page() {
     }
   }, [tab, viewMonth, viewYear]);
 
-  useEffect(() => {
-    if (!message) return;
-    const id = window.setTimeout(() => setMessage(null), 4800);
-    return () => window.clearTimeout(id);
-  }, [message]);
-
   const selectedFile = files.find((file) => file.id === selectedFileId) || null;
   const breakAllowanceMinutes = selectedFile?.breakAllowanceMinutes ?? 40;
   const payrollSettings = selectedFile?.payrollSettings || {
@@ -949,9 +956,9 @@ export default function Page() {
           loadEntries(selectedFileId, viewYear, viewMonth, true),
           loadActiveShift(selectedFileId, true),
         ]);
-        if (showMessage) setMessage("הנתונים רועננו וסונכרנו");
+        if (showMessage) notify("הנתונים רועננו וסונכרנו");
       } else if (showMessage) {
-        setMessage(navigator.onLine ? "Google Drive מנותק" : "אין חיבור לרשת — מוצג המטמון האחרון");
+        notify(navigator.onLine ? "Google Drive מנותק" : "אין חיבור לרשת — מוצג המטמון האחרון");
       }
     } finally {
       // Avoid a flash that is too short to read while still ending exactly after
@@ -1056,7 +1063,7 @@ export default function Page() {
     // Optimistic by design: the UI advances immediately and the durable local
     // queue performs the Google write in the background, in strict order.
     enqueueAndApply(event);
-    setMessage(status?.connected && navigator.onLine ? `${success} · מסתנכרן ברקע` : `${success} · נשמר מקומית לסנכרון`);
+    notify(status?.connected && navigator.onLine ? `${success} · מסתנכרן ברקע` : `${success} · נשמר מקומית לסנכרון`);
     if (status?.connected && navigator.onLine) void flushQueue();
   }
 
@@ -1134,20 +1141,20 @@ export default function Page() {
       setActiveShift(null);
       setTab("home");
       window.scrollTo({ top: 0, behavior: "smooth" });
-      setMessage("התיקייה וקובץ הנוכחות נוצרו ב-Google Drive");
-    } catch (error) { setMessage(error instanceof Error ? error.message : "לא ניתן ליצור קובץ"); }
+      notify("התיקייה וקובץ הנוכחות נוצרו ב-Google Drive");
+    } catch (error) { notify(error instanceof Error ? error.message : "לא ניתן ליצור קובץ"); }
     finally { setPendingAction(null); }
   }
 
   async function renameFile(file: AttendanceFile) {
-    if (!status?.connected || !online) return setMessage("שינוי שם דורש חיבור ל-Drive כדי למנוע התנגשות");
+    if (!status?.connected || !online) return notify("שינוי שם דורש חיבור ל-Drive כדי למנוע התנגשות");
     const name = window.prompt("שם חדש", file.name)?.trim();
     if (!name || name === file.name) return;
     setPendingAction("rename");
     try {
       await api(`/api/drive/files/${encodeURIComponent(file.id)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
-      setMenuFile(null); await loadFiles(true); setMessage("השם עודכן גם ב-Google Drive");
-    } catch (error) { setMessage(error instanceof Error ? error.message : "לא ניתן לשנות שם"); }
+      setMenuFile(null); await loadFiles(true); notify("השם עודכן גם ב-Google Drive");
+    } catch (error) { notify(error instanceof Error ? error.message : "לא ניתן לשנות שם"); }
     finally { setPendingAction(null); }
   }
 
@@ -1162,8 +1169,8 @@ export default function Page() {
       await api(`/api/drive/files/${encodeURIComponent(pathFile.id)}`, {
         method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ folderPath: parsePath(pathValue) }),
       });
-      setPathFile(null); await loadFiles(true); setMessage("הנתיב עודכן ב-Google Drive");
-    } catch (error) { setMessage(error instanceof Error ? error.message : "לא ניתן להעביר את הקובץ"); }
+      setPathFile(null); await loadFiles(true); notify("הנתיב עודכן ב-Google Drive");
+    } catch (error) { notify(error instanceof Error ? error.message : "לא ניתן להעביר את הקובץ"); }
     finally { setPendingAction(null); }
   }
 
@@ -1199,7 +1206,7 @@ export default function Page() {
     const extra = pendingForFile ? `\nיש ${pendingForFile} פעולות מקומיות שטרם סונכרנו וגם הן יימחקו.` : "";
     if (!skipConfirm && !window.confirm(`להסיר את “${file.name}” מהאפליקציה?\nהקובץ כבר לא נמצא ב-Google Drive.${extra}`)) return;
     clearWorkspaceFromLocalState(file);
-    setMessage("הרשומה הוסרה מהאפליקציה.");
+    notify("הרשומה הוסרה מהאפליקציה.");
   }
 
   async function deleteFile(file: AttendanceFile) {
@@ -1209,21 +1216,21 @@ export default function Page() {
     if (file.missingFromDrive) {
       return removeFileFromApp(file);
     }
-    if (!status?.connected || !online) return setMessage("כדי לבדוק ולמחוק גם מ-Drive צריך להיות מחובר");
+    if (!status?.connected || !online) return notify("כדי לבדוק ולמחוק גם מ-Drive צריך להיות מחובר");
     if (!window.confirm(`להסיר את “${file.name}”?\nהקובץ עדיין נמצא ב-Google Drive ולכן הוא יועבר לאשפה, והרשומה תוסר גם מהאפליקציה.${extra}`)) return;
 
     setPendingAction("delete");
     try {
       await api(`/api/drive/files/${encodeURIComponent(file.id)}`, { method: "DELETE" });
       clearWorkspaceFromLocalState(file);
-      setMessage("הקובץ הועבר לאשפה והרשומה הוסרה מהאפליקציה");
+      notify("הקובץ הועבר לאשפה והרשומה הוסרה מהאפליקציה");
     } catch (error) {
       if (isWorkspaceMissingError(error)) {
         // Drive already confirms that the file no longer exists, so only local cleanup is needed.
         clearWorkspaceFromLocalState(file);
-        setMessage("הקובץ כבר לא קיים ב-Drive. הרשומה הוסרה מהאפליקציה.");
+        notify("הקובץ כבר לא קיים ב-Drive. הרשומה הוסרה מהאפליקציה.");
       } else {
-        setMessage(error instanceof Error ? error.message : "לא ניתן להסיר את הקובץ");
+        notify(error instanceof Error ? error.message : "לא ניתן להסיר את הקובץ");
       }
     } finally { setPendingAction(null); }
   }
@@ -1249,13 +1256,13 @@ export default function Page() {
           breakMinutes: Number(editBreakMinutes || 0), note: editNote,
         }),
       });
-      setEditingEntry(null); await refreshCurrent(); setMessage("הרשומה עודכנה וסונכרנה");
-    } catch (error) { setMessage(error instanceof Error ? error.message : "לא ניתן לערוך רשומה"); }
+      setEditingEntry(null); await refreshCurrent(); notify("הרשומה עודכנה וסונכרנה");
+    } catch (error) { notify(error instanceof Error ? error.message : "לא ניתן לערוך רשומה"); }
     finally { setPendingAction(null); }
   }
 
   async function deleteEntry(entry: AttendanceEntry) {
-    if (!selectedFileId || !status?.connected || !online) return setMessage("מחיקת רשומה דורשת חיבור ל-Drive");
+    if (!selectedFileId || !status?.connected || !online) return notify("מחיקת רשומה דורשת חיבור ל-Drive");
     if (!window.confirm(`למחוק את הרשומה של ${entry.date}? הפעולה תמחק את השורה מה-Google Sheet.`)) return;
 
     // Optimistic delete: remove the card immediately. The Drive/Sheets write runs
@@ -1273,13 +1280,13 @@ export default function Page() {
       setActiveShift(null);
       window.localStorage.removeItem(activeCacheKey(workspaceId));
     }
-    setMessage("הרשומה נמחקה · מסנכרן ברקע");
+    notify("הרשומה נמחקה · מסנכרן ברקע");
 
     try {
       const params = new URLSearchParams({ workspaceId, year: String(year), month: String(month) });
       await api(`/api/attendance/${encodeURIComponent(entry.id)}?${params.toString()}`, { method: "DELETE" });
       // No full refresh here: the optimistic cache is already the desired state.
-      setMessage("הרשומה נמחקה וסונכרנה");
+      notify("הרשומה נמחקה וסונכרנה");
     } catch (error) {
       // A failed Google write must never silently lose a row. Restore the snapshot.
       window.localStorage.setItem(key, JSON.stringify(previous));
@@ -1289,7 +1296,7 @@ export default function Page() {
         setActiveShift(entry);
         window.localStorage.setItem(activeCacheKey(workspaceId), JSON.stringify(entry));
       }
-      setMessage(error instanceof Error ? `המחיקה לא סונכרנה: ${error.message}` : "לא ניתן למחוק רשומה");
+      notify(error instanceof Error ? `המחיקה לא סונכרנה: ${error.message}` : "לא ניתן למחוק רשומה");
     }
   }
 
@@ -1298,8 +1305,8 @@ export default function Page() {
     setPendingAction("folder");
     try {
       await api("/api/drive/folders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: parsePath(newFolderPath) }) });
-      setNewFolderPath(""); await loadFolders(); setMessage("התיקייה נוצרה ב-Google Drive");
-    } catch (error) { setMessage(error instanceof Error ? error.message : "לא ניתן ליצור תיקייה"); }
+      setNewFolderPath(""); await loadFolders(); notify("התיקייה נוצרה ב-Google Drive");
+    } catch (error) { notify(error instanceof Error ? error.message : "לא ניתן ליצור תיקייה"); }
     finally { setPendingAction(null); }
   }
 
@@ -1319,9 +1326,9 @@ export default function Page() {
       await Promise.all([loadFiles(true), loadFolders()]);
       setSelectedFileId(data.file.id);
       setTab("home");
-      setMessage(`התיקייה “${name}” נוצרה ליד התיק הנוכחי, ובתוכה נוצר קובץ נוכחות ${new Date().getFullYear()}`);
+      notify(`התיקייה “${name}” נוצרה ליד התיק הנוכחי, ובתוכה נוצר קובץ נוכחות ${new Date().getFullYear()}`);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "לא ניתן ליצור תיקייה וקובץ נוכחות");
+      notify(error instanceof Error ? error.message : "לא ניתן ליצור תיקייה וקובץ נוכחות");
     } finally {
       setPendingAction(null);
     }
@@ -1335,7 +1342,7 @@ export default function Page() {
       const data = await api<{ files: DriveSpreadsheetCandidate[] }>("/api/drive/spreadsheets");
       setDriveCandidates(data.files);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "לא ניתן לקרוא קבצים מ-Google Drive");
+      notify(error instanceof Error ? error.message : "לא ניתן לקרוא קבצים מ-Google Drive");
     } finally {
       setLoadingDriveCandidates(false);
     }
@@ -1361,9 +1368,9 @@ export default function Page() {
       await loadFiles(true);
       setSelectedFileId(data.file.id);
       setTab("home");
-      setMessage("קובץ Google Sheets הותאם לאפליקציה ונבחר לעבודה");
+      notify("קובץ Google Sheets הותאם לאפליקציה ונבחר לעבודה");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "לא ניתן להשתמש בקובץ שנבחר");
+      notify(error instanceof Error ? error.message : "לא ניתן להשתמש בקובץ שנבחר");
     } finally {
       setPendingAction(null);
     }
@@ -1376,8 +1383,8 @@ export default function Page() {
     setPendingAction("folder");
     try {
       await api("/api/drive/folders", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: folder.id, name }) });
-      await loadFiles(true); await loadFolders(); setMessage("שם התיקייה עודכן ב-Google Drive");
-    } catch (error) { setMessage(error instanceof Error ? error.message : "לא ניתן לשנות שם תיקייה"); }
+      await loadFiles(true); await loadFolders(); notify("שם התיקייה עודכן ב-Google Drive");
+    } catch (error) { notify(error instanceof Error ? error.message : "לא ניתן לשנות שם תיקייה"); }
     finally { setPendingAction(null); }
   }
 
@@ -1388,15 +1395,15 @@ export default function Page() {
     setPendingAction("folder");
     try {
       await api(`/api/drive/folders?id=${encodeURIComponent(folder.id)}`, { method: "DELETE" });
-      await loadFiles(true); await loadFolders(); setMessage("התיקייה הועברה לאשפה ב-Google Drive");
-    } catch (error) { setMessage(error instanceof Error ? error.message : "לא ניתן למחוק תיקייה"); }
+      await loadFiles(true); await loadFolders(); notify("התיקייה הועברה לאשפה ב-Google Drive");
+    } catch (error) { notify(error instanceof Error ? error.message : "לא ניתן למחוק תיקייה"); }
     finally { setPendingAction(null); }
   }
 
   async function saveBreakAllowance() {
     if (!selectedFileId || !status?.connected || !online || pendingAction) return;
     const minutes = Math.max(0, Math.min(600, Math.floor(Number(breakAllowanceInput))));
-    if (!Number.isFinite(minutes)) return setMessage("מספר הדקות לא תקין");
+    if (!Number.isFinite(minutes)) return notify("מספר הדקות לא תקין");
     setPendingAction("settings");
     setDrawerOpen(false);
     setTab("home");
@@ -1410,9 +1417,9 @@ export default function Page() {
       await loadFiles(true);
       await refreshCurrent();
       setBreakAllowanceInput(String(minutes));
-      setMessage(`כלל ההפסקה עודכן ל-${minutes} דקות. הרשומות הקיימות חושבו מחדש.`);
+      notify(`כלל ההפסקה עודכן ל-${minutes} דקות. הרשומות הקיימות חושבו מחדש.`);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "לא ניתן לעדכן את כלל ההפסקה");
+      notify(error instanceof Error ? error.message : "לא ניתן לעדכן את כלל ההפסקה");
     } finally {
       setPendingAction(null);
     }
@@ -1446,16 +1453,16 @@ export default function Page() {
         body: JSON.stringify({ payrollSettings: payload }),
       });
       await loadFiles(true);
-      setMessage("הגדרות השכר נשמרו וסונכרנו ל-Google Drive");
+      notify("הגדרות השכר נשמרו וסונכרנו ל-Google Drive");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "לא ניתן לשמור את הגדרות השכר");
+      notify(error instanceof Error ? error.message : "לא ניתן לשמור את הגדרות השכר");
     } finally {
       setPendingAction(null);
     }
   }
 
   function addPayrollAddition() {
-    if (payrollAdditions.length >= 8) return setMessage("אפשר להוסיף עד 8 תוספות חודשיות");
+    if (payrollAdditions.length >= 8) return notify("אפשר להוסיף עד 8 תוספות חודשיות");
     setPayrollAdditions((items) => [...items, { id: crypto.randomUUID(), name: "", amount: 0 }]);
   }
 
@@ -1468,7 +1475,7 @@ export default function Page() {
       setDrawerOpen(false);
       setTab("home");
       window.scrollTo({ top: 0, behavior: "smooth" });
-      setMessage("התנתקת מ-Google Drive. התחבר מחדש כדי להמשיך לעבוד מול Drive.");
+      notify("התנתקת מ-Google Drive. התחבר מחדש כדי להמשיך לעבוד מול Drive.");
     } finally { setPendingAction(null); }
   }
 
@@ -1696,7 +1703,7 @@ export default function Page() {
         <button className={tab === "files" ? "selected" : ""} onClick={() => setTab("files")}><Icon name="files"/>קבצים</button>
       </nav>}
 
-      {message && !/invalid value/i.test(message) && <div className="toast">{message}</div>}
+      {message && <div className="toast" role="status" aria-live="polite">{message}</div>}
 
       {createOpen && <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setCreateOpen(false)}><div className="modal-card"><div className="modal-title"><div><p className="eyebrow">Google Drive</p><h2>קובץ נוכחות חדש</h2></div><button className="icon-button compact" onClick={() => setCreateOpen(false)}><Icon name="close"/></button></div><label className="field-label">שם שיופיע באפליקציה</label><input className="text-input" value={createName} onChange={(e) => setCreateName(e.target.value)} placeholder="לדוגמה: מס הכנסה" autoFocus/><label className="field-label">שם התיקייה</label><input className="text-input" value={createFolderName} onChange={(e) => setCreateFolderName(e.target.value)} placeholder="לדוגמה: עבודה"/><label className="field-label">תת־תיקייה <span className="optional-label">אופציונלי</span></label><input className="text-input" value={createSubfolderName} onChange={(e) => setCreateSubfolderName(e.target.value)} placeholder="לדוגמה: רשות המסים"/><div className="drive-preview"><span>המבנה שייווצר ב-Drive</span><strong>נוכחות בעבודה / {createFolderName || "תיקייה"}{createSubfolderName ? ` / ${createSubfolderName}` : ""} / נוכחות {new Date().getFullYear()}</strong><small>לא תיווצר תיקיית עטיפה נוספת. קובץ ה-Google Sheets יישב ישירות בתיקייה שבחרת.</small></div><button className="primary-action modal-action" disabled={!createName.trim() || !createFolderName.trim() || pendingAction === "create"} onClick={() => void createFile()}>{pendingAction === "create" ? "יוצר ב-Drive…" : "צור וסנכרן"}</button></div></div>}
 
