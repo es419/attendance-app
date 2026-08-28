@@ -386,7 +386,7 @@ export default function Page() {
   const [loadingEntries, setLoadingEntries] = useState(false);
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
   const [message, setMessage] = useState<string | null>(null);
-  const messageTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const messageTimerRef = useRef<number | null>(null);
   const [online, setOnline] = useState(true);
   const [queue, setQueue] = useState<OfflineAttendanceEvent[]>([]);
   const [bootLoading, setBootLoading] = useState(true);
