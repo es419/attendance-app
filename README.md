@@ -180,3 +180,9 @@ The Google refresh token is kept only inside an encrypted HttpOnly cookie and is
 ## Auth persistence / canonical Vercel host
 
 The app now redirects Vercel deployment-specific hostnames to the canonical origin derived from `GOOGLE_REDIRECT_URI`. This matters because OAuth cookies are host-bound: authenticating on the stable production alias and later opening a deployment URL would otherwise appear as a disconnected session. Keep `GOOGLE_REDIRECT_URI` set to the stable production URL, e.g. `https://attendance-app-blush-two.vercel.app/api/auth/google/callback`.
+
+## Optimistic attendance queue and pull-to-refresh
+
+Attendance actions (clock in/out, break start/end, and manual shifts) are applied to the UI and persisted locally immediately. Google Drive/Sheets writes run in a durable FIFO queue in the background. The queue survives closing/reopening the app and retries after reconnecting. Server-confirmed rows replace optimistic cache rows as each queued action completes.
+
+On touch devices, pulling down from the top and releasing after the threshold triggers a full refresh. The branded app loader stays visible until queued writes have completed and the current Drive/Sheets state has been read back. The same branded loader remains in use for app startup and tab transitions.

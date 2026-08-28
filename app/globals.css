@@ -1221,3 +1221,53 @@ h2 { margin: 0; font-size: 18px; letter-spacing: -.02em; }
   .brand-loader-icon,
   .brand-loader-icon::after { animation-duration: 1.8s; }
 }
+
+/* Optimistic action queue + pull-to-refresh */
+.pull-refresh-indicator {
+  position: fixed;
+  z-index: 3900;
+  top: calc(env(safe-area-inset-top) + 2px);
+  left: 50%;
+  width: max-content;
+  max-width: calc(100vw - 28px);
+  height: 38px;
+  padding: 5px 10px 5px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface-solid) 94%, transparent);
+  box-shadow: 0 10px 30px rgba(15, 23, 42, .12);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  pointer-events: none;
+  will-change: transform, opacity;
+  transition: opacity .08s linear;
+}
+.pull-refresh-indicator img {
+  width: 27px;
+  height: 27px;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(14, 66, 150, .15);
+  transition: transform .16s ease;
+}
+.pull-refresh-indicator.ready {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent, #2563eb) 26%, var(--line));
+}
+.pull-refresh-indicator.ready img { transform: rotate(8deg) scale(1.06); }
+
+.app-loading-overlay.refresh {
+  background: color-mix(in srgb, var(--bg) 86%, transparent);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pull-refresh-indicator,
+  .pull-refresh-indicator img { transition: none !important; }
+}

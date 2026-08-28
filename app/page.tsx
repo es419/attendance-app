@@ -374,10 +374,19 @@ export default function Page() {
   const [queue, setQueue] = useState<OfflineAttendanceEvent[]>([]);
   const [bootLoading, setBootLoading] = useState(true);
   const [pageLoading, setPageLoading] = useState(false);
+  const [refreshLoading, setRefreshLoading] = useState(false);
+  const [pullDistance, setPullDistance] = useState(0);
+  const [pullReady, setPullReady] = useState(false);
   const filesFetchedAtRef = useRef(0);
   const entriesFetchedAtRef = useRef(new Map<string, number>());
   const activeFetchedAtRef = useRef(new Map<string, number>());
   const didRenderTabRef = useRef(false);
+  const queueFlushPromiseRef = useRef<Promise<void> | null>(null);
+  const [queueSyncing, setQueueSyncing] = useState(false);
+  const refreshBusyRef = useRef(false);
+  const shellRef = useRef<HTMLElement | null>(null);
+  const pullStartYRef = useRef<number | null>(null);
+  const pullReadyRef = useRef(false);
 
   const [createOpen, setCreateOpen] = useState(false);
   const [createName, setCreateName] = useState("");
@@ -551,37 +560,85 @@ export default function Page() {
     window.localStorage.setItem(QUEUE_KEY, JSON.stringify(events));
   }, []);
 
-  const flushQueue = useCallback(async () => {
-    if (!status?.connected || !navigator.onLine || pendingAction === "sync") return;
-    const events = readJson<OfflineAttendanceEvent[]>(QUEUE_KEY, []);
-    if (!events.length) return;
-    setPendingAction("sync");
-    const remaining = [...events];
-    let synced = 0;
-    try {
-      while (remaining.length) {
-        const event = remaining[0];
-        await api(eventEndpoint(event), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(eventBody(event)),
-        });
-        remaining.shift();
-        synced++;
-        saveQueue(remaining);
-      }
-      if (selectedFileId) {
-        await loadEntries(selectedFileId, viewYear, viewMonth, true);
-        await loadActiveShift(selectedFileId, true);
-      }
-      setMessage(`${synced} פעולות Offline סונכרנו ל-Google Drive`);
-    } catch (error) {
-      saveQueue(remaining);
-      setMessage(error instanceof Error ? `הסנכרון נעצר: ${error.message}` : "הסנכרון נעצר");
-    } finally {
-      setPendingAction(null);
+  const applyConfirmedEntry = useCallback((confirmed: AttendanceEntry, event: OfflineAttendanceEvent) => {
+    const entryYear = confirmed.year || event.year || viewYear;
+    const entryMonth = confirmed.month || event.month || viewMonth;
+    const key = entryCacheKey(event.workspaceId, entryYear, entryMonth);
+    const cached = readJson<AttendanceEntry[]>(key, []);
+    const without = cached.filter((item) => item.id !== confirmed.id);
+    let updated = [confirmed, ...without];
+
+    // If the user already pressed another button while this request was in flight,
+    // replay those still-pending events over the server-confirmed row. This avoids
+    // visible "jumps backwards" (for example: break starts, then briefly vanishes).
+    const allowance = files.find((file) => file.id === event.workspaceId)?.breakAllowanceMinutes ?? 40;
+    const pendingAfterThis = readJson<OfflineAttendanceEvent[]>(QUEUE_KEY, []).filter((item) => item.id !== event.id && item.workspaceId === event.workspaceId);
+    for (const pending of pendingAfterThis) {
+      const pendingYear = pending.year || (pending.payload?.date ? Number(pending.payload.date.slice(0, 4)) : entryYear);
+      const pendingMonth = pending.month || (pending.payload?.date ? Number(pending.payload.date.slice(5, 7)) : entryMonth);
+      if (pendingYear === entryYear && pendingMonth === entryMonth) updated = optimisticEvent(updated, pending, allowance);
     }
-  }, [loadActiveShift, loadEntries, pendingAction, saveQueue, selectedFileId, status?.connected, viewMonth, viewYear]);
+
+    window.localStorage.setItem(key, JSON.stringify(updated));
+    if (event.workspaceId === selectedFileId && entryYear === viewYear && entryMonth === viewMonth) setEntries(updated);
+
+    if (event.type !== "manual") {
+      const activeKey = activeCacheKey(event.workspaceId);
+      const currentEntry = updated.find((item) => item.id === confirmed.id) || confirmed;
+      if (currentEntry.clockOut) {
+        if (event.workspaceId === selectedFileId) setActiveShift(null);
+        window.localStorage.removeItem(activeKey);
+      } else {
+        if (event.workspaceId === selectedFileId) setActiveShift(currentEntry);
+        window.localStorage.setItem(activeKey, JSON.stringify(currentEntry));
+      }
+    }
+  }, [activeCacheKey, files, selectedFileId, viewMonth, viewYear]);
+
+  const flushQueue = useCallback(async () => {
+    if (!status?.connected || !navigator.onLine) return;
+    if (queueFlushPromiseRef.current) return queueFlushPromiseRef.current;
+
+    const worker = (async () => {
+      setQueueSyncing(true);
+      let synced = 0;
+      try {
+        while (navigator.onLine && status?.connected) {
+          const current = readJson<OfflineAttendanceEvent[]>(QUEUE_KEY, []);
+          if (!current.length) break;
+          const event = current[0];
+          const data = await api<{ entry: AttendanceEntry }>(eventEndpoint(event), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(eventBody(event)),
+          });
+          applyConfirmedEntry(data.entry, event);
+
+          // Remove only the event that just succeeded from the *latest* queue.
+          // New button presses may have been appended while this request was in flight.
+          const latest = readJson<OfflineAttendanceEvent[]>(QUEUE_KEY, []);
+          saveQueue(latest.filter((item) => item.id !== event.id));
+          synced++;
+        }
+        if (synced) setMessage(`${synced} פעולות סונכרנו ברקע`);
+      } catch (error) {
+        // The event stays in the persistent queue. A later foreground refresh or
+        // reconnect retries it in the same order, so closing the app loses nothing.
+        if (!(error instanceof ApiRequestError && error.network)) {
+          setMessage(error instanceof Error ? `פעולה ממתינה לסנכרון: ${error.message}` : "הסנכרון ינסה שוב בהמשך");
+        }
+      } finally {
+        setQueueSyncing(false);
+      }
+    })();
+
+    queueFlushPromiseRef.current = worker;
+    try {
+      await worker;
+    } finally {
+      queueFlushPromiseRef.current = null;
+    }
+  }, [applyConfirmedEntry, saveQueue, status?.connected]);
 
   useEffect(() => {
     let cancelled = false;
@@ -717,24 +774,106 @@ export default function Page() {
     ]);
   }, [loadActiveShift, loadEntries, selectedFileId, viewMonth, viewYear]);
 
+  const refreshAll = useCallback(async (showMessage = true) => {
+    if (refreshBusyRef.current) return;
+    refreshBusyRef.current = true;
+    setRefreshLoading(true);
+    const startedAt = Date.now();
+    try {
+      const currentStatus = await loadStatus();
+      if (currentStatus.connected && navigator.onLine) {
+        // Writes go first, then we pull the authoritative Drive/Sheets state.
+        await flushQueue();
+        await loadFiles(true);
+        if (selectedFileId) await Promise.all([
+          loadEntries(selectedFileId, viewYear, viewMonth, true),
+          loadActiveShift(selectedFileId, true),
+        ]);
+        if (showMessage) setMessage("הנתונים רועננו וסונכרנו");
+      } else if (showMessage) {
+        setMessage(navigator.onLine ? "Google Drive מנותק" : "אין חיבור לרשת — מוצג המטמון האחרון");
+      }
+    } finally {
+      // Avoid a flash that is too short to read while still ending exactly after
+      // the refresh work is complete (with a tiny minimum for visual continuity).
+      const delay = Math.max(0, 360 - (Date.now() - startedAt));
+      window.setTimeout(() => {
+        setRefreshLoading(false);
+        refreshBusyRef.current = false;
+      }, delay);
+    }
+  }, [flushQueue, loadActiveShift, loadEntries, loadFiles, loadStatus, selectedFileId, viewMonth, viewYear]);
+
   const syncNow = useCallback(async () => {
-    if (!status?.connected || !navigator.onLine) return;
-    await loadFiles(true);
-    if (selectedFileId) await Promise.all([
-      loadEntries(selectedFileId, viewYear, viewMonth, true),
-      loadActiveShift(selectedFileId, true),
-    ]);
-    await flushQueue();
-  }, [flushQueue, loadActiveShift, loadEntries, loadFiles, selectedFileId, status?.connected, viewMonth, viewYear]);
+    await refreshAll(true);
+  }, [refreshAll]);
+
+  useEffect(() => {
+    const target = shellRef.current;
+    if (!target) return;
+
+    const resetPull = () => {
+      pullStartYRef.current = null;
+      pullReadyRef.current = false;
+      setPullDistance(0);
+      setPullReady(false);
+    };
+
+    const onTouchStart = (event: TouchEvent) => {
+      if (refreshLoading || bootLoading || window.scrollY > 1 || document.querySelector(".modal-backdrop, .drawer-backdrop")) return;
+      pullStartYRef.current = event.touches[0]?.clientY ?? null;
+      pullReadyRef.current = false;
+    };
+
+    const onTouchMove = (event: TouchEvent) => {
+      if (pullStartYRef.current === null || !event.touches[0]) return;
+      const delta = event.touches[0].clientY - pullStartYRef.current;
+      if (delta <= 0 || window.scrollY > 1) { resetPull(); return; }
+      if (delta > 8) event.preventDefault();
+      const distance = Math.min(86, delta * 0.42);
+      const ready = delta >= 105;
+      pullReadyRef.current = ready;
+      setPullReady(ready);
+      setPullDistance(distance);
+    };
+
+    const onTouchEnd = () => {
+      const shouldRefresh = pullReadyRef.current;
+      resetPull();
+      if (shouldRefresh) {
+        if (typeof navigator !== "undefined" && "vibrate" in navigator) navigator.vibrate?.(18);
+        void refreshAll(true);
+      }
+    };
+
+    target.addEventListener("touchstart", onTouchStart, { passive: true });
+    target.addEventListener("touchmove", onTouchMove, { passive: false });
+    target.addEventListener("touchend", onTouchEnd, { passive: true });
+    target.addEventListener("touchcancel", resetPull, { passive: true });
+    return () => {
+      target.removeEventListener("touchstart", onTouchStart);
+      target.removeEventListener("touchmove", onTouchMove);
+      target.removeEventListener("touchend", onTouchEnd);
+      target.removeEventListener("touchcancel", resetPull);
+    };
+  }, [bootLoading, refreshAll, refreshLoading]);
 
   function enqueueAndApply(event: OfflineAttendanceEvent) {
     const current = readJson<OfflineAttendanceEvent[]>(QUEUE_KEY, []);
     if (!current.some((item) => item.id === event.id)) saveQueue([...current, event]);
+
+    const targetYear = event.year || (event.payload?.date ? Number(event.payload.date.slice(0, 4)) : viewYear);
+    const targetMonth = event.month || (event.payload?.date ? Number(event.payload.date.slice(5, 7)) : viewMonth);
+    const targetKey = entryCacheKey(event.workspaceId, targetYear, targetMonth);
+    const targetIsVisible = event.workspaceId === selectedFileId && targetYear === viewYear && targetMonth === viewMonth;
+
     setEntries((before) => {
-      const updated = optimisticEvent(before, event, breakAllowanceMinutes);
-      if (selectedFileId) window.localStorage.setItem(entryCacheKey(selectedFileId, viewYear, viewMonth), JSON.stringify(updated));
-      return updated;
+      const source = targetIsVisible ? before : readJson<AttendanceEntry[]>(targetKey, []);
+      const updated = optimisticEvent(source, event, breakAllowanceMinutes);
+      window.localStorage.setItem(targetKey, JSON.stringify(updated));
+      return targetIsVisible ? updated : before;
     });
+
     if (event.type !== "manual") {
       setActiveShift((before) => {
         let next: AttendanceEntry | null = before;
@@ -751,54 +890,14 @@ export default function Page() {
         return next;
       });
     }
-    setMessage("נשמר מקומית. הפעולה תסתנכרן אוטומטית כשתחזור גישה ל-Drive");
   }
 
-  async function sendOrQueue(event: OfflineAttendanceEvent, pending: PendingAction, success: string) {
-    if (pendingAction) return;
-    if (!status?.connected || !navigator.onLine) {
-      enqueueAndApply(event);
-      return;
-    }
-    setPendingAction(pending);
-    try {
-      const data = await api<{ entry: AttendanceEntry }>(eventEndpoint(event), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(eventBody(event)),
-      });
-
-      // The mutation endpoint already returns the authoritative row. Apply it
-      // locally instead of immediately re-reading the same Sheet twice (entries +
-      // active shift). This makes quick clock-in feel instant and dramatically
-      // reduces Sheets read-quota usage.
-      const confirmed = data.entry;
-      const entryYear = confirmed.year || event.year || viewYear;
-      const entryMonth = confirmed.month || event.month || viewMonth;
-      const key = entryCacheKey(event.workspaceId, entryYear, entryMonth);
-      const cached = readJson<AttendanceEntry[]>(key, []);
-      const without = cached.filter((item) => item.id !== confirmed.id);
-      const updated = [confirmed, ...without];
-      window.localStorage.setItem(key, JSON.stringify(updated));
-      if (entryYear === viewYear && entryMonth === viewMonth) setEntries(updated);
-
-      if (event.type !== "manual") {
-        const activeKey = activeCacheKey(event.workspaceId);
-        if (confirmed.clockOut) {
-          setActiveShift(null);
-          window.localStorage.removeItem(activeKey);
-        } else {
-          setActiveShift(confirmed);
-          window.localStorage.setItem(activeKey, JSON.stringify(confirmed));
-        }
-      }
-      setMessage(success);
-    } catch (error) {
-      if (error instanceof ApiRequestError && error.network) enqueueAndApply(event);
-      else setMessage(error instanceof Error ? error.message : "הפעולה נכשלה");
-    } finally {
-      setPendingAction(null);
-    }
+  function sendOrQueue(event: OfflineAttendanceEvent, success: string) {
+    // Optimistic by design: the UI advances immediately and the durable local
+    // queue performs the Google write in the background, in strict order.
+    enqueueAndApply(event);
+    setMessage(status?.connected && navigator.onLine ? `${success} · מסתנכרן ברקע` : `${success} · נשמר מקומית לסנכרון`);
+    if (status?.connected && navigator.onLine) void flushQueue();
   }
 
   async function quickAction(action: "in" | "out") {
@@ -810,13 +909,13 @@ export default function Page() {
         id: crypto.randomUUID(), type: "clock-in", workspaceId: selectedFileId,
         entryId: crypto.randomUUID(), atIso: at.toISOString(), year: local.year, month: local.month,
       };
-      await sendOrQueue(event, "in", "הכניסה נשמרה");
+      sendOrQueue(event, "הכניסה נשמרה");
     } else if (activeEntry) {
       const event: OfflineAttendanceEvent = {
         id: crypto.randomUUID(), type: "clock-out", workspaceId: selectedFileId,
         entryId: activeEntry.id, atIso: at.toISOString(), year: activeEntry.year || local.year, month: activeEntry.month || local.month,
       };
-      await sendOrQueue(event, "out", "היציאה נשמרה");
+      sendOrQueue(event, "היציאה נשמרה");
     }
   }
 
@@ -829,34 +928,23 @@ export default function Page() {
       id: crypto.randomUUID(), type: action === "start" ? "break-start" : "break-end", workspaceId: selectedFileId,
       entryId: activeEntry.id, breakId, atIso: at.toISOString(), year: activeEntry.year || local.year, month: activeEntry.month || local.month,
     };
-    await sendOrQueue(event, action === "start" ? "break-start" : "break-end", action === "start" ? "יצאת להפסקה" : "חזרת מהפסקה");
+    sendOrQueue(event, action === "start" ? "יצאת להפסקה" : "חזרת מהפסקה");
   }
 
   async function addManual() {
-    if (!selectedFileId || !manualDate || !manualStart || !manualEnd || pendingAction) return;
+    if (!selectedFileId || !manualDate || !manualStart || !manualEnd) return;
+    const [manualYear, manualMonth] = manualDate.split("-").map(Number);
     const event: OfflineAttendanceEvent = {
       id: crypto.randomUUID(), type: "manual", workspaceId: selectedFileId, entryId: crypto.randomUUID(),
+      year: manualYear, month: manualMonth,
       payload: { date: manualDate, clockIn: manualStart, clockOut: manualEnd, breakMinutes: Number(manualBreakMinutes || 0), note: manualNote },
     };
-    if (!status?.connected || !navigator.onLine) {
-      enqueueAndApply(event);
-      setManualOpen(false);
-      setTab("records");
-      return;
-    }
-    setPendingAction("manual");
-    try {
-      await api("/api/attendance/manual", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(eventBody(event)) });
-      setManualOpen(false);
-      setManualStart(""); setManualEnd(""); setManualBreakMinutes("0"); setManualNote("");
-      await refreshCurrent();
-      setTab("records");
-      setMessage("המשמרת הידנית נוספה לרשומות");
-    } catch (error) {
-      if (error instanceof ApiRequestError && error.network) {
-        enqueueAndApply(event); setManualOpen(false); setTab("records");
-      } else setMessage(error instanceof Error ? error.message : "לא ניתן להוסיף משמרת");
-    } finally { setPendingAction(null); }
+    sendOrQueue(event, "המשמרת הידנית נשמרה");
+    setManualOpen(false);
+    setManualStart(""); setManualEnd(""); setManualBreakMinutes("0"); setManualNote("");
+    setViewYear(manualYear);
+    setViewMonth(manualMonth);
+    setTab("records");
   }
 
   async function createFile() {
@@ -1029,7 +1117,7 @@ export default function Page() {
   const disconnectedOnline = Boolean(status && configured && !connected && online);
   const hasWorkspace = Boolean(selectedFile);
   const syncText = queue.length
-    ? `${queue.length} פעולות ממתינות לסנכרון`
+    ? queueSyncing ? `מסנכרן ${queue.length} פעולות ברקע…` : `${queue.length} פעולות ממתינות לסנכרון`
     : !online
       ? "Offline — הנתונים נשמרים מקומית"
       : connected
@@ -1037,12 +1125,18 @@ export default function Page() {
         : "Drive מנותק — מוצג המטמון האחרון";
 
   return (
-    <main className="app-shell">
-      {(bootLoading || pageLoading) && (
-        <div className={`app-loading-overlay ${bootLoading ? "boot" : "page"}`} role="status" aria-live="polite">
+    <main ref={shellRef} className="app-shell">
+      {pullDistance > 2 && !refreshLoading && (
+        <div className={`pull-refresh-indicator ${pullReady ? "ready" : ""}`} style={{ transform: `translate3d(-50%, ${Math.round(pullDistance)}px, 0)`, opacity: Math.min(1, pullDistance / 42) }} aria-hidden="true">
+          <img src="/icon-192.png" alt="" />
+          <span>{pullReady ? "שחרר לרענון" : "משוך לרענון"}</span>
+        </div>
+      )}
+      {(bootLoading || pageLoading || refreshLoading) && (
+        <div className={`app-loading-overlay ${bootLoading ? "boot" : refreshLoading ? "refresh" : "page"}`} role="status" aria-live="polite">
           <div className="brand-loader">
             <div className="brand-loader-icon"><img src="/icon-192.png" alt="" /></div>
-            <span>{bootLoading ? "פותח את יומן הנוכחות…" : "טוען…"}</span>
+            <span>{bootLoading ? "פותח את יומן הנוכחות…" : refreshLoading ? "מרענן ומסנכרן…" : "טוען…"}</span>
           </div>
         </div>
       )}
@@ -1090,11 +1184,11 @@ export default function Page() {
               <>
                 <div className="action-stack quick-actions">
                   {!activeEntry ? (
-                    <HoldActionButton className="primary-action" disabled={Boolean(pendingAction)} onComplete={() => quickAction("in")} ariaLabel="לחיצה ארוכה לכניסה מהירה"><span className="action-dot in"/>כניסה מהירה</HoldActionButton>
+                    <HoldActionButton className="primary-action" disabled={pendingAction === "logout"} onComplete={() => quickAction("in")} ariaLabel="לחיצה ארוכה לכניסה מהירה"><span className="action-dot in"/>כניסה מהירה</HoldActionButton>
                   ) : (
                     <>
-                      <button className="secondary-action break-action" disabled={Boolean(pendingAction)} onClick={() => void breakAction(activeBreak ? "end" : "start")}><Icon name="coffee" />{activeBreak ? "חזרה מהפסקה" : "יציאה להפסקה"}</button>
-                      <HoldActionButton className="danger-action" disabled={Boolean(pendingAction)} onComplete={() => quickAction("out")} ariaLabel="לחיצה ארוכה ליציאה מהירה"><span className="action-dot out"/>יציאה מהירה</HoldActionButton>
+                      <button className="secondary-action break-action" disabled={pendingAction === "logout"} onClick={() => void breakAction(activeBreak ? "end" : "start")}><Icon name="coffee" />{activeBreak ? "חזרה מהפסקה" : "יציאה להפסקה"}</button>
+                      <HoldActionButton className="danger-action" disabled={pendingAction === "logout"} onComplete={() => quickAction("out")} ariaLabel="לחיצה ארוכה ליציאה מהירה"><span className="action-dot out"/>יציאה מהירה</HoldActionButton>
                     </>
                   )}
                   <button className="secondary-action manual-button" onClick={() => setManualOpen(true)}><Icon name="clock" />הוספת משמרת ידנית</button>
@@ -1197,7 +1291,7 @@ export default function Page() {
 
       {createOpen && <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setCreateOpen(false)}><div className="modal-card"><div className="modal-title"><div><p className="eyebrow">Google Drive</p><h2>קובץ נוכחות חדש</h2></div><button className="icon-button compact" onClick={() => setCreateOpen(false)}><Icon name="close"/></button></div><label className="field-label">שם קובץ הנוכחות</label><input className="text-input" value={createName} onChange={(e) => setCreateName(e.target.value)} placeholder="לדוגמה: מס הכנסה" autoFocus/><label className="field-label">שם התיקייה</label><input className="text-input" value={createFolderName} onChange={(e) => setCreateFolderName(e.target.value)} placeholder="לדוגמה: עבודה"/><label className="field-label">תת־תיקייה <span className="optional-label">אופציונלי</span></label><input className="text-input" value={createSubfolderName} onChange={(e) => setCreateSubfolderName(e.target.value)} placeholder="לדוגמה: רשות המסים"/><div className="drive-preview"><span>הנתיב שייווצר</span><strong>נוכחות בעבודה / {createFolderName || "תיקייה"}{createSubfolderName ? ` / ${createSubfolderName}` : ""} / {createName || "קובץ נוכחות"}</strong></div><button className="primary-action modal-action" disabled={!createName.trim() || !createFolderName.trim() || pendingAction === "create"} onClick={() => void createFile()}>{pendingAction === "create" ? "יוצר ב-Drive…" : "צור וסנכרן"}</button></div></div>}
 
-      {manualOpen && <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setManualOpen(false)}><div className="modal-card"><div className="modal-title"><div><p className="eyebrow">משמרת ידנית</p><h2>הוספת שעות</h2></div><button className="icon-button compact" onClick={() => setManualOpen(false)}><Icon name="close"/></button></div><label className="field-label">תאריך</label><input className="text-input ltr-input" type="date" value={manualDate} onChange={(e) => setManualDate(e.target.value)}/><div className="two-fields"><div><label className="field-label">כניסה</label><input className="text-input ltr-input" type="time" value={manualStart} onChange={(e) => setManualStart(e.target.value)}/></div><div><label className="field-label">יציאה</label><input className="text-input ltr-input" type="time" value={manualEnd} onChange={(e) => setManualEnd(e.target.value)}/></div></div><label className="field-label">סה״כ דקות הפסקה</label><input className="text-input ltr-input" type="number" min="0" max="600" value={manualBreakMinutes} onChange={(e) => setManualBreakMinutes(e.target.value)}/><label className="field-label">הערה <span className="optional-label">אופציונלי</span></label><input className="text-input" value={manualNote} onChange={(e) => setManualNote(e.target.value)} placeholder="לדוגמה: עבודה מהבית"/><div className="break-policy-card"><Icon name="coffee"/><div><strong>כלל ההפסקה: {breakAllowanceMinutes} דקות</strong><span>{breakAllowanceMinutes === 0 ? "כל דקות ההפסקה ינוכו מזמן העבודה." : `רק דקות ההפסקה שמעבר ל־${breakAllowanceMinutes} דקות ינוכו מזמן העבודה.`}</span></div></div><button className="primary-action modal-action" disabled={!manualStart || !manualEnd || Boolean(pendingAction)} onClick={() => void addManual()}>{connected && online ? "שמור משמרת" : "שמור מקומית לסנכרון"}</button></div></div>}
+      {manualOpen && <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setManualOpen(false)}><div className="modal-card"><div className="modal-title"><div><p className="eyebrow">משמרת ידנית</p><h2>הוספת שעות</h2></div><button className="icon-button compact" onClick={() => setManualOpen(false)}><Icon name="close"/></button></div><label className="field-label">תאריך</label><input className="text-input ltr-input" type="date" value={manualDate} onChange={(e) => setManualDate(e.target.value)}/><div className="two-fields"><div><label className="field-label">כניסה</label><input className="text-input ltr-input" type="time" value={manualStart} onChange={(e) => setManualStart(e.target.value)}/></div><div><label className="field-label">יציאה</label><input className="text-input ltr-input" type="time" value={manualEnd} onChange={(e) => setManualEnd(e.target.value)}/></div></div><label className="field-label">סה״כ דקות הפסקה</label><input className="text-input ltr-input" type="number" min="0" max="600" value={manualBreakMinutes} onChange={(e) => setManualBreakMinutes(e.target.value)}/><label className="field-label">הערה <span className="optional-label">אופציונלי</span></label><input className="text-input" value={manualNote} onChange={(e) => setManualNote(e.target.value)} placeholder="לדוגמה: עבודה מהבית"/><div className="break-policy-card"><Icon name="coffee"/><div><strong>כלל ההפסקה: {breakAllowanceMinutes} דקות</strong><span>{breakAllowanceMinutes === 0 ? "כל דקות ההפסקה ינוכו מזמן העבודה." : `רק דקות ההפסקה שמעבר ל־${breakAllowanceMinutes} דקות ינוכו מזמן העבודה.`}</span></div></div><button className="primary-action modal-action" disabled={!manualStart || !manualEnd} onClick={() => void addManual()}>{connected && online ? "שמור משמרת" : "שמור מקומית לסנכרון"}</button></div></div>}
 
       {editingEntry && <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setEditingEntry(null)}><div className="modal-card"><div className="modal-title"><div><p className="eyebrow">עריכת רשומה</p><h2>{editingEntry.date}</h2></div><button className="icon-button compact" onClick={() => setEditingEntry(null)}><Icon name="close"/></button></div><label className="field-label">תאריך</label><input className="text-input ltr-input" type="date" value={editDate} onChange={(e) => setEditDate(e.target.value)}/><div className="two-fields"><div><label className="field-label">כניסה</label><input className="text-input ltr-input" type="time" value={editStart} onChange={(e) => setEditStart(e.target.value)}/></div><div><label className="field-label">יציאה {editingEntry.clockOut ? "" : "(אופציונלי)"}</label><input className="text-input ltr-input" type="time" value={editEnd} onChange={(e) => setEditEnd(e.target.value)}/></div></div><label className="field-label">דקות הפסקה</label><input className="text-input ltr-input" type="number" min="0" value={editBreakMinutes} onChange={(e) => setEditBreakMinutes(e.target.value)}/><label className="field-label">הערה</label><input className="text-input" value={editNote} onChange={(e) => setEditNote(e.target.value)}/><p className="modal-note">עריכה מתבצעת ישירות מול שורת ה-Google Sheet. שינוי חודש/שנה יעביר את הרשומה לגיליון המתאים.</p><button className="primary-action modal-action" disabled={!connected || !online || !editDate || !editStart || Boolean(pendingAction)} onClick={() => void saveEntryEdit()}>שמור שינויים</button></div></div>}
 
@@ -1207,7 +1301,7 @@ export default function Page() {
 
       {menuFile && <div className="modal-backdrop bottom-sheet-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setMenuFile(null)}><div className="bottom-sheet"><div className="sheet-grabber"/><div className="sheet-file-title"><strong>{menuFile.name}</strong><span>{(menuFile.folderPath || []).join(" / ") || "שורש האפליקציה"}</span></div>{menuFile.webViewLink && <a className="sheet-action" href={menuFile.webViewLink} target="_blank" rel="noreferrer"><Icon name="external"/>פתח ב-Google Drive</a>}<button className="sheet-action" onClick={() => void renameFile(menuFile)}><Icon name="edit"/>שנה שם</button><button className="sheet-action" onClick={() => openMove(menuFile)}><Icon name="move"/>שנה נתיב / העבר</button><button className="sheet-action danger" onClick={() => void deleteFile(menuFile)}><Icon name="trash"/>העבר לאשפה</button><button className="sheet-cancel" onClick={() => setMenuFile(null)}>ביטול</button></div></div>}
 
-      {drawerOpen && <div className="drawer-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setDrawerOpen(false)}><aside className="side-drawer"><div className="drawer-header"><div><p className="eyebrow">הגדרות</p><h2>אפליקציית נוכחות</h2></div><button className="icon-button compact" onClick={() => setDrawerOpen(false)}><Icon name="close"/></button></div><section className="drawer-section"><h3>מראה</h3><div className="theme-picker"><button className={theme === "system" ? "selected" : ""} onClick={() => setTheme("system")}><Icon name="system"/>מערכת</button><button className={theme === "light" ? "selected" : ""} onClick={() => setTheme("light")}><Icon name="sun"/>בהיר</button><button className={theme === "dark" ? "selected" : ""} onClick={() => setTheme("dark")}><Icon name="moon"/>חשוך</button></div></section>{selectedFile && <section className="drawer-section break-settings"><h3>כלל הפסקה · {selectedFile.name}</h3><p>כמה דקות הפסקה מותרות לפני שמתחיל ניכוי מהשעות. ההגדרה נשמרת ב-Drive של קובץ הנוכחות ומסתנכרנת בין מכשירים.</p><div className="break-presets">{[0, 20, 30, 40, 60].map((value) => <button key={value} className={Number(breakAllowanceInput) === value ? "selected" : ""} onClick={() => setBreakAllowanceInput(String(value))}>{value}</button>)}</div><div className="break-setting-row"><div className="minutes-input"><input type="number" min="0" max="600" inputMode="numeric" value={breakAllowanceInput} onChange={(e) => setBreakAllowanceInput(e.target.value)}/><span>דקות</span></div><button className="small-button" disabled={!connected || !online || pendingAction === "settings" || Number(breakAllowanceInput) === breakAllowanceMinutes} onClick={() => void saveBreakAllowance()}>{pendingAction === "settings" ? "שומר…" : "שמור"}</button></div><small>שינוי הכלל מחשב מחדש גם רשומות שכבר נסגרו כדי שהאפליקציה וה-Sheets יישארו עקביים.</small></section>}<section className="drawer-section sync-section"><h3>סנכרון</h3><div className="sync-summary"><Icon name={online ? "sync" : "offline"}/><div><strong>{syncText}</strong><span>Drive הוא מקור האמת. בהתחברות מחדש מתבצעת סריקה מלאה לפי metadata.</span></div></div>{queue.length > 0 && <><button className="small-button drawer-wide" disabled={!connected || !online || pendingAction === "sync"} onClick={() => void flushQueue()}><Icon name="sync"/>{pendingAction === "sync" ? "מסנכרן…" : `סנכרן ${queue.length} פעולות`}</button><button className="text-button danger-text" onClick={() => { if (confirm("למחוק את כל הפעולות שעדיין לא סונכרנו?")) saveQueue([]); }}>מחק פעולות ממתינות</button></>}</section>{connected ? <section className="drawer-section account-section"><h3>Google Drive</h3><div className="drawer-account"><div className="drive-badge"><Icon name="drive"/></div><div><strong>{status?.name || "Google"}</strong><span>{status?.email || "מחובר"}</span></div></div><button className="logout-button" disabled={pendingAction === "logout"} onClick={() => void disconnect()}><Icon name="logout"/>{pendingAction === "logout" ? "מתנתק…" : "התנתק מ-Google Drive"}</button></section> : configured && online ? <a className="primary-link" href="/api/auth/google">התחבר מחדש ל-Google Drive</a> : null}<div className="drawer-legal-links"><a href="/privacy">מדיניות פרטיות</a><a href="/terms">תנאי שימוש</a></div><p className="drawer-note">התנתקות מבטלת את הרשאת Google. המטמון המקומי נשאר לקריאה, ופעולות נוכחות יכולות להמתין עד לחיבור הבא. שינויים ידניים ב-Drive ייקלטו בסריקה המלאה לאחר ההתחברות.</p></aside></div>}
+      {drawerOpen && <div className="drawer-backdrop" onMouseDown={(e) => e.target === e.currentTarget && setDrawerOpen(false)}><aside className="side-drawer"><div className="drawer-header"><div><p className="eyebrow">הגדרות</p><h2>אפליקציית נוכחות</h2></div><button className="icon-button compact" onClick={() => setDrawerOpen(false)}><Icon name="close"/></button></div><section className="drawer-section"><h3>מראה</h3><div className="theme-picker"><button className={theme === "system" ? "selected" : ""} onClick={() => setTheme("system")}><Icon name="system"/>מערכת</button><button className={theme === "light" ? "selected" : ""} onClick={() => setTheme("light")}><Icon name="sun"/>בהיר</button><button className={theme === "dark" ? "selected" : ""} onClick={() => setTheme("dark")}><Icon name="moon"/>חשוך</button></div></section>{selectedFile && <section className="drawer-section break-settings"><h3>כלל הפסקה · {selectedFile.name}</h3><p>כמה דקות הפסקה מותרות לפני שמתחיל ניכוי מהשעות. ההגדרה נשמרת ב-Drive של קובץ הנוכחות ומסתנכרנת בין מכשירים.</p><div className="break-presets">{[0, 20, 30, 40, 60].map((value) => <button key={value} className={Number(breakAllowanceInput) === value ? "selected" : ""} onClick={() => setBreakAllowanceInput(String(value))}>{value}</button>)}</div><div className="break-setting-row"><div className="minutes-input"><input type="number" min="0" max="600" inputMode="numeric" value={breakAllowanceInput} onChange={(e) => setBreakAllowanceInput(e.target.value)}/><span>דקות</span></div><button className="small-button" disabled={!connected || !online || pendingAction === "settings" || Number(breakAllowanceInput) === breakAllowanceMinutes} onClick={() => void saveBreakAllowance()}>{pendingAction === "settings" ? "שומר…" : "שמור"}</button></div><small>שינוי הכלל מחשב מחדש גם רשומות שכבר נסגרו כדי שהאפליקציה וה-Sheets יישארו עקביים.</small></section>}<section className="drawer-section sync-section"><h3>סנכרון</h3><div className="sync-summary"><Icon name={online ? "sync" : "offline"}/><div><strong>{syncText}</strong><span>Drive הוא מקור האמת. בהתחברות מחדש מתבצעת סריקה מלאה לפי metadata.</span></div></div>{queue.length > 0 && <><button className="small-button drawer-wide" disabled={!connected || !online || queueSyncing} onClick={() => void flushQueue()}><Icon name="sync"/>{queueSyncing ? "מסנכרן…" : `סנכרן ${queue.length} פעולות`}</button><button className="text-button danger-text" onClick={() => { if (confirm("למחוק את כל הפעולות שעדיין לא סונכרנו?")) saveQueue([]); }}>מחק פעולות ממתינות</button></>}</section>{connected ? <section className="drawer-section account-section"><h3>Google Drive</h3><div className="drawer-account"><div className="drive-badge"><Icon name="drive"/></div><div><strong>{status?.name || "Google"}</strong><span>{status?.email || "מחובר"}</span></div></div><button className="logout-button" disabled={pendingAction === "logout"} onClick={() => void disconnect()}><Icon name="logout"/>{pendingAction === "logout" ? "מתנתק…" : "התנתק מ-Google Drive"}</button></section> : configured && online ? <a className="primary-link" href="/api/auth/google">התחבר מחדש ל-Google Drive</a> : null}<div className="drawer-legal-links"><a href="/privacy">מדיניות פרטיות</a><a href="/terms">תנאי שימוש</a></div><p className="drawer-note">התנתקות מבטלת את הרשאת Google. המטמון המקומי נשאר לקריאה, ופעולות נוכחות יכולות להמתין עד לחיבור הבא. שינויים ידניים ב-Drive ייקלטו בסריקה המלאה לאחר ההתחברות.</p></aside></div>}
     </main>
   );
 }
